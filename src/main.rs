@@ -1,13 +1,13 @@
 use winapi::{
     shared::windef::POINT,
     um::{
-        wingdi::GetPixel,
+        wingdi::{GetPixel, RGB},
         winuser::{
-            ClientToScreen, FindWindowW, GetCursorPos, GetDC, GetForegroundWindow,
-            GetSystemMetrics, ReleaseDC, ScreenToClient, SendInput, SetForegroundWindow, INPUT,
-            INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
-            MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT, SM_CXSCREEN,
-            SM_CYSCREEN,
+            ClientToScreen, FindWindowW, GetCursorPos, GetDC, GetDesktopWindow,
+            GetForegroundWindow, GetSystemMetrics, ReleaseDC, ScreenToClient, SendInput,
+            SetForegroundWindow, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_UNICODE,
+            MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
+            MOUSEINPUT, SM_CXSCREEN, SM_CYSCREEN,
         },
     },
 };
@@ -27,7 +27,7 @@ static ROCKSTAR_OFFSETS: Offsets = Offsets {
     email: POINT { x: 350, y: 245 },
     password: POINT { x: 335, y: 300 },
     sign_in: POINT { x: 845, y: 380 },
-    verify_captcha_btn: POINT { x: 630, y: 395 },
+    verify_captcha_btn: POINT { x: 630, y: 397 },
 };
 
 async fn keyboard_write(text: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -61,7 +61,7 @@ async fn keyboard_write(text: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn print_mouse_position_relative_to_window(window_name: &str) -> POINT {
+fn _print_mouse_position_relative_to_window(window_name: &str) -> POINT {
     let wide_name: Vec<u16> = window_name.encode_utf16().collect();
     let wide_name_null_terminated = [&wide_name[..], &[0u16][..]].concat();
 
@@ -90,11 +90,15 @@ fn print_mouse_position_relative_to_window(window_name: &str) -> POINT {
     }
 }
 
-async fn get_pixel_color(window_name: &str, x: i32, y: i32) -> u32 {
+async fn get_pixel_color(
+    window_name: &str,
+    x: i32,
+    y: i32,
+) -> Result<u32, Box<dyn std::error::Error>> {
     let wide_name: Vec<u16> = window_name.encode_utf16().collect();
-    let wide_name_null_terminated = [&wide_name[..], &[0u16][..]].concat();
+    let _wide_name_null_terminated = [&wide_name[..], &[0u16][..]].concat();
 
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), wide_name_null_terminated.as_ptr()) };
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), _wide_name_null_terminated.as_ptr()) };
     if hwnd.is_null() {
         eprintln!("Window not found!");
         panic!("Window not found!");
@@ -104,10 +108,54 @@ async fn get_pixel_color(window_name: &str, x: i32, y: i32) -> u32 {
     unsafe { ClientToScreen(hwnd, &mut point) };
 
     let hdc = unsafe { GetDC(hwnd) };
-    let color = unsafe { GetPixel(hdc, point.x, point.y) };
+
+    // convert x,y to screen coordinates
+    let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+
+    let x_scaled = (point.x as f64 / width as f64 * 65535.0) as i32;
+    let y_scaled = (point.y as f64 / height as f64 * 65535.0) as i32;
+
+    let color = unsafe { GetPixel(hdc, x, y) };
+    // move mouse ti the get pixel position
+    let mouse_input_move = MOUSEINPUT {
+        dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
+        dx: x_scaled,
+        dy: y_scaled,
+        mouseData: 0,
+        dwExtraInfo: 0,
+        time: 0,
+    };
+
+    let mut input_move = INPUT {
+        type_: INPUT_MOUSE,
+        u: unsafe { std::mem::zeroed() },
+    };
+
+    println!(
+        "Mouse position relative to screen: ({}, {})",
+        point.x, point.y
+    );
+
+    unsafe {
+        *input_move.u.mi_mut() = mouse_input_move;
+        SendInput(1, &mut input_move, std::mem::size_of::<INPUT>() as i32);
+    }
+
     unsafe { ReleaseDC(hwnd, hdc) };
 
-    color
+    if color == -1i32 as u32 {
+        eprintln!("Failed to get pixel color.");
+        return Err("Failed to get pixel color.".into());
+    }
+
+    let r = (color & 0x000000FF) as u8;
+    let g = ((color & 0x0000FF00) >> 8) as u8;
+    let b = ((color & 0x00FF0000) >> 16) as u8;
+
+    println!("R: {}, G: {}, B: {}", r, g, b);
+
+    Ok(color)
 }
 
 async fn ghost_click(window_name: &str, x: i32, y: i32) -> Result<(), Box<dyn std::error::Error>> {
@@ -219,11 +267,32 @@ async fn ghost_click(window_name: &str, x: i32, y: i32) -> Result<(), Box<dyn st
     Ok(())
 }
 
+async fn make_async_loop_fn_with_retries<F>(
+    _fn: F,
+    ms: u64,
+    max_retries: u8,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: Fn(),
+{
+    let mut retries = 0;
+    loop {
+        _fn();
+        retries += 1;
+
+        if retries >= max_retries {
+            return Ok(());
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window_name = "Rockstar Games - Social Club";
     // loop {
-    //     let client_point = print_mouse_position_relative_to_window(window_name);
+    //     let client_point = _print_mouse_position_relative_to_window(window_name);
 
     //     println!(
     //         "Mouse position relative to screen: ({}, {})",
@@ -258,7 +327,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let color = get_pixel_color(window_name, 100, 100).await;
+    make_async_loop_fn_with_retries
 
     Ok(())
 }
