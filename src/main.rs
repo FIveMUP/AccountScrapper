@@ -267,25 +267,25 @@ async fn ghost_click(window_name: &str, x: i32, y: i32) -> Result<(), Box<dyn st
     Ok(())
 }
 
-async fn make_async_loop_fn_with_retries<F>(
-    _fn: F,
+async fn make_async_loop_fn_with_retries<F, E>(
+    mut func: F,
     ms: u64,
-    max_retries: u8,
+    mut retries: u8,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    F: Fn(),
+    F: FnMut() -> Result<(), E>,
 {
-    let mut retries = 0;
-    loop {
-        _fn();
-        retries += 1;
-
-        if retries >= max_retries {
+    while retries > 0 {
+        if func().is_ok() {
             return Ok(());
         }
-
+        retries -= 1;
         tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
+    Err(Box::new(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "retries exhausted",
+    )))
 }
 
 #[tokio::main]
@@ -293,7 +293,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window_name = "Rockstar Games - Social Club";
     // loop {
     //     let client_point = _print_mouse_position_relative_to_window(window_name);
-
     //     println!(
     //         "Mouse position relative to screen: ({}, {})",
     //         client_point.x, client_point.y
@@ -327,7 +326,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    make_async_loop_fn_with_retries
+    make_async_loop_fn_with_retries(
+        || {
+            println!("Trying to find captcha button...");
+
+            if false {
+                Ok(())
+            } else {
+                Err("Captcha button not found")
+            }
+        },
+        150,
+        10,
+    )
+    .await?;
 
     Ok(())
 }
