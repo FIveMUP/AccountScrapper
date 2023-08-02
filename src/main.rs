@@ -1,7 +1,15 @@
+use std::{ffi::OsStr, os::windows::prelude::OsStrExt, ptr::null_mut};
+
+use image::{ImageBuffer, Rgb};
+use screenshots::{Compression, Screen};
+use std::{fs, time::Instant};
 use winapi::{
-    shared::windef::POINT,
+    shared::windef::{HBITMAP, HDC, HWND, POINT, RECT},
     um::{
-        wingdi::{GetPixel, RGB},
+        wingdi::{
+            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, GetDIBits, GetPixel, BITMAPINFO,
+            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGB, RGBQUAD, SRCCOPY,
+        },
         winuser::{
             ClientToScreen, FindWindowW, GetCursorPos, GetDC, GetDesktopWindow,
             GetForegroundWindow, GetSystemMetrics, ReleaseDC, ScreenToClient, SendInput,
@@ -53,6 +61,7 @@ async fn keyboard_write(text: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for mut input in inputs {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         unsafe {
             SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32);
         }
@@ -267,29 +276,32 @@ async fn ghost_click(window_name: &str, x: i32, y: i32) -> Result<(), Box<dyn st
     Ok(())
 }
 
-async fn make_async_loop_fn_with_retries<F, E>(
-    mut func: F,
+async fn make_async_loop_fn_with_retries<F, Fut>(
+    _fn: F,
     ms: u64,
-    mut retries: u8,
+    retries: u8,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    F: FnMut() -> Result<(), E>,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<(), Box<dyn std::error::Error>>>,
 {
-    while retries > 0 {
-        if func().is_ok() {
-            return Ok(());
+    let mut retries_count = 0;
+    loop {
+        match _fn().await {
+            Ok(()) => return Ok(()),
+            Err(_) if retries_count >= retries => return Err("Max retries reached".into()),
+            Err(_) => {
+                retries_count += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
         }
-        retries -= 1;
-        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
-    Err(Box::new(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        "retries exhausted",
-    )))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let screens = Screen::all().unwrap();
+    let my_screen: &Screen = &screens[0];
     let window_name = "Rockstar Games - Social Club";
     // loop {
     //     let client_point = _print_mouse_position_relative_to_window(window_name);
@@ -326,20 +338,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    make_async_loop_fn_with_retries(
-        || {
-            println!("Trying to find captcha button...");
+    // make_async_loop_fn_with_retries(
+    //     || async {
+    //         println!("Trying to find captcha button...");
 
-            if false {
-                Ok(())
-            } else {
-                Err("Captcha button not found")
-            }
-        },
-        150,
-        10,
+    //         let color = get_pixel_color(
+    //             window_name,
+    //             ROCKSTAR_OFFSETS.verify_captcha_btn.x,
+    //             ROCKSTAR_OFFSETS.verify_captcha_btn.y,
+    //         )
+    //         .await?;
+
+    //         if color == 1683451 {
+    //             println!("Captcha button found!");
+    //             return Ok(());
+    //         } else {
+    //             println!("Captcha button not found!");
+    //             return Err("Captcha button not found!".into());
+    //         }
+    //     },
+    //     150,
+    //     25,
+    // )
+    // .await?;
+
+    ghost_click(
+        window_name,
+        ROCKSTAR_OFFSETS.verify_captcha_btn.x,
+        ROCKSTAR_OFFSETS.verify_captcha_btn.y,
     )
     .await?;
+
+    // let mut image = myScreen.capture().unwrap();
+    let image = my_screen.capture_area(300, 300, 300, 300).unwrap();
+    let buffer = image.to_png(None).unwrap();
+    fs::write(
+        format!("target/{}-2.png", my_screen.display_info.id),
+        buffer,
+    )
+    .unwrap();
 
     Ok(())
 }

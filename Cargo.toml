@@ -8,3 +8,5 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1.29.1", features = ["full"] }
 winapi = { version = "0.3.9", features = ["winuser", "winreg"] }
+image = "0.24.6"
+screenshots = "0.7.1"
