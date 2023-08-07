@@ -1,7 +1,10 @@
+extern crate serde_json;
+use serde_json::Value;
 use image::{ImageBuffer, Rgb};
 use memflex::types::ModuleInfoWithName;
 use screenshots::{Compression, Screen};
-use std::{ffi::OsStr, io::Write, os::windows::prelude::OsStrExt, ptr::null_mut};
+use std::{ffi::OsStr, io::Write, os::windows::prelude::OsStrExt, ptr::null_mut, collections::HashMap};
+use base64::{Engine as _, engine::{self, general_purpose}, alphabet};
 use std::{fs, time::Instant};
 use tokio::io::stdout;
 use winapi::{
@@ -20,7 +23,6 @@ use winapi::{
         },
     },
 };
-
 use regex::Regex;
 
 struct Account {
@@ -91,9 +93,16 @@ fn _print_mouse_position_relative_to_window(window_name: &str) -> POINT {
 
     unsafe { ScreenToClient(hwnd, &mut point) };
 
+    let real_point = unsafe {
+        let mut point = std::mem::zeroed();
+        GetCursorPos(&mut point);
+        point
+    };
+
     println!(
-        "Mouse position relative to window: ({}, {})",
-        point.x, point.y
+        "Mouse position relative to window: ({}, {}), real position: ({}, {})",
+        point.x, point.y,
+        real_point.x, real_point.y
     );
 
     POINT {
@@ -301,156 +310,193 @@ where
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting...");
-    #[cfg(windows)]
-    if let Ok(p) = memflex::external::open_process_by_name(
-        "_GTAProcess.exe",
-        false,
-        memflex::types::win::PROCESS_ALL_ACCESS,
-    ) {
-        println!("p: {:?}", p.name());
-
-        let module = p.find_module("XAudio2_8.dll").unwrap();
-        println!("module: {:?}", module);
-
-        let buffer_size = 64 * 1024; // Aumentando el tamaño del búfer
-        let mut buffer = vec![0u8; buffer_size];
-
-        let start_address = module.base as usize;
-        let end_address = module.base as usize + 8 * 1024 * 1024 * 1204;
-
-        // Compilar la expresión regular una vez
-        let re = Regex::new(r"machineHashIndex=([^&]+)").unwrap();
-
-        println!(
-            "Starting exploring from 0x{:?} to 0x{:?} 8GB",
-            start_address, end_address
-        );
-
-        println!(
-            "Starting exploring from 0x{:?} to 0x{:?} 8GB",
-            start_address, end_address
-        );
-        println!("[Checking: 0x{:?}]", start_address);
-
-        std::io::stdout().flush().unwrap();
-
-        for address in (start_address..end_address).step_by(buffer.len()) {
-            if p.read_buf(address, &mut buffer).is_ok() {
-                let result_string = String::from_utf8_lossy(&buffer);
-
-                // Buscar el índice de la cadena "machineHash" en el búfer
-                if let Some(index) = result_string.find("machineHash") {
-                    // Aplicar la expresión regular solo en la parte relevante del búfer
-                    let relevant_part = &result_string[index..];
-                    if let Some(captures) = re.captures(relevant_part) {
-                        let machine_hash_index = captures.get(1).unwrap().as_str();
-                        // Salva la posición del cursor y avanza una línea
-                        print!("\x1B[s\nMachine hash index found: {:?} at 0x{:x}", machine_hash_index, address);
-                        // Restaura la posición del cursor y reescribe la línea de estado
-                        print!("\x1B[u[Checking: 0x{:x}]\r", address);
-                        std::io::stdout().flush().unwrap();
-                    }
-                }
-
-                // Actualiza la línea de estado sin cambiar la posición del cursor
-                print!("[Checking: 0x{:x}]\r", address);
-                std::io::stdout().flush().unwrap();
-            }
-        }
-
-        // Agrega una nueva línea al final para que la consola regrese a un estado normal
-        println!("\n\n");
-    } else {
-        println!("Process not found");
-    }
-
-    println!("Press any key to continue...");
-    let _ = std::io::stdin().read_line(&mut String::new());
-
-    Ok(())
-}
-
+// #[tokio::main]
 // async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//     let screens = Screen::all().unwrap();
-//     let my_screen: &Screen = &screens[0];
-//     let window_name = "Rockstar Games - Social Club";
-//     // loop {
-//     //     let client_point = _print_mouse_position_relative_to_window(window_name);
-//     //     println!(
-//     //         "Mouse position relative to screen: ({}, {})",
-//     //         client_point.x, client_point.y
-//     //     );
-//     //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-//     // }
+//     println!("Starting...");
+//     #[cfg(windows)]
+//     if let Ok(p) = memflex::external::open_process_by_name(
+//         "_GTAProcess.exe",
+//         false,
+//         memflex::types::win::PROCESS_ALL_ACCESS,
+//     ) {
+//         println!("p: {:?}", p.name());
 
-//     let account = Account {
-//         email: "cristian124421@gmail.com".to_string(),
-//         password: "Lokesea124!".to_string(),
-//     };
+//         let module = p.find_module("XAudio2_8.dll").unwrap();
+//         println!("module: {:?}", module);
 
-//     ghost_click(
-//         window_name,
-//         ROCKSTAR_OFFSETS.email.x,
-//         ROCKSTAR_OFFSETS.email.y,
-//     )
-//     .await?;
-//     keyboard_write(&account.email).await?;
-//     ghost_click(
-//         window_name,
-//         ROCKSTAR_OFFSETS.password.x,
-//         ROCKSTAR_OFFSETS.password.y,
-//     )
-//     .await?;
-//     keyboard_write(&account.password).await?;
-//     ghost_click(
-//         window_name,
-//         ROCKSTAR_OFFSETS.sign_in.x,
-//         ROCKSTAR_OFFSETS.sign_in.y,
-//     )
-//     .await?;
+//         let buffer_size = 64 * 1024;
+//         let mut buffer = vec![0u8; buffer_size];
 
-//     make_async_loop_fn_with_retries(
-//         || async {
-//             println!("Trying to find captcha button...");
+//         let start_address = module.base as usize;
+//         let end_address = module.base as usize + 8 * 1024 * 1024 * 1204;
 
-//             let color = get_pixel_color(
-//                 window_name,
-//                 ROCKSTAR_OFFSETS.verify_captcha_btn.x,
-//                 ROCKSTAR_OFFSETS.verify_captcha_btn.y,
-//             )
-//             .await?;
+//         let re = Regex::new(r"machineHashIndex=([^&]+)").unwrap();
 
-//             if color == 1683451 {
-//                 println!("Captcha button found!");
-//                 return Ok(());
-//             } else {
-//                 println!("Captcha button not found!");
-//                 return Err("Captcha button not found!".into());
+//         println!(
+//             "Starting exploring from 0x{:?} to 0x{:?} 8GB",
+//             start_address, end_address
+//         );
+
+//         println!(
+//             "Starting exploring from 0x{:?} to 0x{:?} 8GB",
+//             start_address, end_address
+//         );
+//         println!("[Checking: 0x{:?}]", start_address);
+
+//         std::io::stdout().flush().unwrap();
+
+//         for address in (start_address..end_address).step_by(buffer.len()) {
+//             if p.read_buf(address, &mut buffer).is_ok() {
+//                 let result_string = String::from_utf8_lossy(&buffer);
+
+//                 if let Some(index) = result_string.find("machineHash") {
+//                     let relevant_part = &result_string[index..];
+//                     if let Some(captures) = re.captures(relevant_part) {
+//                         let machine_hash_index = captures.get(1).unwrap().as_str();
+//                         print!("\x1B[s\nMachine hash index found: {:?} at 0x{:x}", machine_hash_index, address);
+//                         print!("\x1B[u[Checking: 0x{:x}]\r", address);
+//                         std::io::stdout().flush().unwrap();
+//                     }
+//                 }
+
+//                 print!("[Checking: 0x{:x}]\r", address);
+//                 std::io::stdout().flush().unwrap();
 //             }
-//         },
-//         150,
-//         25,
-//     )
-//     .await?;
+//         }
 
-//     ghost_click(
-//         window_name,
-//         ROCKSTAR_OFFSETS.verify_captcha_btn.x,
-//         ROCKSTAR_OFFSETS.verify_captcha_btn.y,
-//     )
-//     .await?;
+//         println!("\n\n");
+//     } else {
+//         println!("Process not found");
+//     }
 
-//     // let mut image = myScreen.capture().unwrap();
-//     let image = my_screen.capture_area(300, 300, 300, 300).unwrap();
-//     let buffer = image.to_png(None).unwrap();
-//     fs::write(
-//         format!("target/{}-2.png", my_screen.display_info.id),
-//         buffer,
-//     )
-//     .unwrap();
+//     println!("Press any key to continue...");
+//     let _ = std::io::stdin().read_line(&mut String::new());
 
 //     Ok(())
 // }
+
+enum JsonValue {
+    Single(String),
+    List(Vec<String>)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let screens = Screen::all().unwrap();
+    let my_screen: &Screen = &screens[0];
+    let window_name = "Rockstar Games - Social Club";
+    // loop {
+    //     let client_point = _print_mouse_position_relative_to_window(window_name);
+    //     println!(
+    //         "Mouse position relative to screen: ({}, {})",
+    //         client_point.x, client_point.y
+    //     );
+    //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // }
+
+    // let account = Account {
+    //     email: "cristian124421@gmail.com".to_string(),
+    //     password:                                                                                                                                                   "Lokesea124!".to_string(),
+    // };
+
+    // ghost_click(
+    //     window_name,
+    //     ROCKSTAR_OFFSETS.email.x,
+    //     ROCKSTAR_OFFSETS.email.y,
+    // )
+    // .await?;
+    // keyboard_write(&account.email).await?;
+    // ghost_click(
+    //     window_name,
+    //     ROCKSTAR_OFFSETS.password.x,
+    //     ROCKSTAR_OFFSETS.password.y,
+    // )
+    // .await?;
+    // keyboard_write(&account.password).await?;
+    // ghost_click(
+    //     window_name,
+    //     ROCKSTAR_OFFSETS.sign_in.x,
+    //     ROCKSTAR_OFFSETS.sign_in.y,
+    // )
+    // .await?;
+
+    // make_async_loop_fn_with_retries(
+    //     || async {
+    //         println!("Trying to find captcha button...");
+
+    //         let color = get_pixel_color(
+    //             window_name,
+    //             ROCKSTAR_OFFSETS.verify_captcha_btn.x,
+    //             ROCKSTAR_OFFSETS.verify_captcha_btn.y,
+    //         )
+    //         .await?;
+
+    //         if color == 1683451 {
+    //             println!("Captcha button found!");
+    //             return Ok(());
+    //         } else {
+    //             println!("Captcha button not found!");
+    //             return Err("Captcha button not found!".into());
+    //         }
+    //     },
+    //     150,
+    //     25,
+    // )
+    // .await?;
+
+    // ghost_click(
+    //     window_name,
+    //     ROCKSTAR_OFFSETS.verify_captcha_btn.x,
+    //     ROCKSTAR_OFFSETS.verify_captcha_btn.y,
+    // )
+    // .await?;
+
+    // let mut image = myScreen.capture().unwrap();
+    let image = my_screen.capture_area(805, 380, 305, 240).unwrap();
+    let buffer = image.to_png(None).unwrap();
+    // convert to base64 and save to file
+    fs::write(
+        format!("{}-2.png", my_screen.display_info.id),
+        buffer.clone(),
+    )
+    .unwrap();
+    let base64 = general_purpose::STANDARD.encode(&buffer);
+    fs::write("captcha.txt", base64.clone()).unwrap();
+
+    // let mut params: HashMap<&str, JsonValue> = HashMap::new();
+
+    // params.insert("key",                                                                                                                                                    JsonValue::Single("sub_1NFmnDCRwBwvt6ptOZH8VdJn".to_string()));
+    // params.insert("type", JsonValue::Single("funcaptcha".to_string()));
+    // params.insert("task", JsonValue::Single("Pick the image that is the correct way up".to_string()));
+    // let base64_string = "HQ9IjEwMCIgdmlld0JveD0iMCAwIDMy...";
+    // params.insert("image_data", JsonValue::List(vec![base64_string.to_string()]));
+
+    //     // Imprime para verificar
+    // for (key, value) in &params {
+    //     match value {
+    //         JsonValue::Single(s) => println!("{}: {}", key, s),
+    //         JsonValue::List(l) => println!("{}: {:?}", key, l),
+    //     }
+    // }
+
+    let mut params: HashMap<&str, Value> = HashMap::new();
+
+    params.insert("key", Value::String("sub_1NFmnDCRwBwvt6ptOZH8VdJn".to_string()));
+    params.insert("type", Value::String("funcaptcha".to_string()));
+    params.insert("task", Value::String("Pick the image that is the correct way up".to_string()));
+
+    let base64_string = "HQ9IjEwMCIgdmlld0JveD0iMCAwIDMy...";
+    params.insert("image_data", Value::Array(vec![Value::String(base64_string.to_string())]));
+
+
+    let client = reqwest::Client::new();
+    let res = client.post("https://api.nopecha.com/")
+    .json(&params)
+    .send()
+    .await?;
+
+    println!("Response: {:?}", res.text().await?);
+
+
+    Ok(())
+}
