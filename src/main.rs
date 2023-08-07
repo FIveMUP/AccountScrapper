@@ -1,12 +1,13 @@
 extern crate serde_json;
+use serde::__private::from_utf8_lossy;
 use serde_json::Value;
 use image::{ImageBuffer, Rgb};
 use memflex::types::ModuleInfoWithName;
 use screenshots::{Compression, Screen};
-use std::{ffi::OsStr, io::Write, os::windows::prelude::OsStrExt, ptr::null_mut, collections::HashMap};
+use std::{ffi::OsStr, io::Write, os::windows::prelude::OsStrExt, ptr::null_mut, collections::HashMap, str::from_utf8_unchecked, sync::{Arc, Mutex}};
 use base64::{Engine as _, engine::{self, general_purpose}, alphabet};
 use std::{fs, time::Instant};
-use tokio::io::stdout;
+use tokio::{io::stdout, sync::RwLock};
 use winapi::{
     shared::windef::{HBITMAP, HDC, HWND, POINT, RECT},
     um::{
@@ -29,18 +30,50 @@ struct Account {
     email: String,
     password: String,
 }
+
+struct  VerifyCaptchaMessage {
+    color: u32,
+    message: &'static str,
+}
+
+struct VerifyCaptcha {
+    position: POINT,
+    validation: VerifyCaptchaMessage,
+}
+
 struct Offsets {
+    window_name: &'static str,
     email: POINT,
     password: POINT,
     sign_in: POINT,
     verify_captcha_btn: POINT,
+    verify_captcha_buttons: [POINT; 6],
+    verify_captcha_messages: [VerifyCaptcha; 3],
 }
 
 static ROCKSTAR_OFFSETS: Offsets = Offsets {
+    window_name: "Rockstar Games - Social Club",
     email: POINT { x: 350, y: 245 },
     password: POINT { x: 335, y: 300 },
     sign_in: POINT { x: 845, y: 380 },
     verify_captcha_btn: POINT { x: 630, y: 397 },
+    verify_captcha_buttons: [POINT { x: 535, y: 275 }, POINT { x: 635, y: 275 }, POINT { x: 735, y: 275 }, POINT { x: 535, y: 375 }, POINT { x: 635, y: 375 }, POINT { x: 735, y: 375 }],
+    verify_captcha_messages: [
+        VerifyCaptcha {
+            position: POINT { x: 527, y: 256 }, 
+            validation: VerifyCaptchaMessage { color: 3387392, message: "try_again" },
+        },
+        VerifyCaptcha {
+            position: POINT { x: 682, y: 329 }, 
+            validation: VerifyCaptchaMessage { color: 0, message: "try_again" },
+        },
+        VerifyCaptcha {
+            position: POINT { x: 657, y: 310 }, 
+            validation: VerifyCaptchaMessage { color: 3048749, message: "solved" },
+        },
+
+    ],
+
 };
 
 async fn keyboard_write(text: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -153,11 +186,6 @@ async fn get_pixel_color(
         u: unsafe { std::mem::zeroed() },
     };
 
-    println!(
-        "Mouse position relative to screen: ({}, {})",
-        point.x, point.y
-    );
-
     unsafe {
         *input_move.u.mi_mut() = mouse_input_move;
         SendInput(1, &mut input_move, std::mem::size_of::<INPUT>() as i32);
@@ -170,11 +198,10 @@ async fn get_pixel_color(
         return Err("Failed to get pixel color.".into());
     }
 
-    let r = (color & 0x000000FF) as u8;
-    let g = ((color & 0x0000FF00) >> 8) as u8;
-    let b = ((color & 0x00FF0000) >> 16) as u8;
+    // let r = (color & 0x000000FF) as u8;
+    // let g = ((color & 0x0000FF00) >> 8) as u8;
+    // let b = ((color & 0x00FF0000) >> 16) as u8;
 
-    println!("R: {}, G: {}, B: {}", r, g, b);
 
     Ok(color)
 }
@@ -288,6 +315,28 @@ async fn ghost_click(window_name: &str, x: i32, y: i32) -> Result<(), Box<dyn st
     Ok(())
 }
 
+async fn captcha_click(captcha_array: &Vec<Value>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut captcha_index = 0;
+    for captcha in captcha_array {
+        captcha_index += 1;
+        if captcha.as_bool().unwrap() {
+            break;
+        }
+    }
+
+    println!("Captcha index: {}", captcha_index);
+
+    let captcha_button_pos = ROCKSTAR_OFFSETS.verify_captcha_buttons[captcha_index];
+
+    ghost_click(
+        "Rockstar Games - Social Club",
+        captcha_button_pos.x,
+        captcha_button_pos.y,
+    ).await?;
+
+    Ok(())
+}
+
 async fn make_async_loop_fn_with_retries<F, Fut>(
     _fn: F,
     ms: u64,
@@ -380,122 +429,187 @@ enum JsonValue {
     List(Vec<String>)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn get_captcha_message() -> Result<String, Box<dyn std::error::Error>> {
+
+    // iter on ROCKSTAR_OFFSETS.captcha_messages and ghost click on coords, if the color match then return message
+    
+    let final_message = RwLock::new(String::new());
+    let result = make_async_loop_fn_with_retries(
+            || async {
+
+            for message in &ROCKSTAR_OFFSETS.verify_captcha_messages {
+                let position = message.position;
+                let color = message.validation.color;
+                let message = message.validation.message;
+                
+                let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, position.x, position.y).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, position.x, position.y).await?;
+                
+                println!("Checking message: {:?}", message);
+
+                if pixel_color == color {
+                    final_message.write().await.push_str(&message);
+                    return Ok(());
+                }
+            }
+
+            if final_message.read().await.len() > 0 {
+                return Ok(());
+            } else {
+                return Err("Captcha message not found".into());
+            }
+            
+        },
+        10,
+        10,
+    )
+    .await;
+
+    if result.is_err() {
+        println!("Info: {:?}", result);
+    } else if final_message.read().await.len() > 0 {
+        return Ok(final_message.read().await.clone());
+    }
+
+    Ok("No message found".into())
+}
+
+async fn solve_captcha() -> Result<(), Box<dyn std::error::Error>> {
     let screens = Screen::all().unwrap();
     let my_screen: &Screen = &screens[0];
-    let window_name = "Rockstar Games - Social Club";
-    // loop {
-    //     let client_point = _print_mouse_position_relative_to_window(window_name);
-    //     println!(
-    //         "Mouse position relative to screen: ({}, {})",
-    //         client_point.x, client_point.y
-    //     );
-    //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    // }
-
-    // let account = Account {
-    //     email: "cristian124421@gmail.com".to_string(),
-    //     password:                                                                                                                                                   "Lokesea124!".to_string(),
-    // };
-
-    // ghost_click(
-    //     window_name,
-    //     ROCKSTAR_OFFSETS.email.x,
-    //     ROCKSTAR_OFFSETS.email.y,
-    // )
-    // .await?;
-    // keyboard_write(&account.email).await?;
-    // ghost_click(
-    //     window_name,
-    //     ROCKSTAR_OFFSETS.password.x,
-    //     ROCKSTAR_OFFSETS.password.y,
-    // )
-    // .await?;
-    // keyboard_write(&account.password).await?;
-    // ghost_click(
-    //     window_name,
-    //     ROCKSTAR_OFFSETS.sign_in.x,
-    //     ROCKSTAR_OFFSETS.sign_in.y,
-    // )
-    // .await?;
-
-    // make_async_loop_fn_with_retries(
-    //     || async {
-    //         println!("Trying to find captcha button...");
-
-    //         let color = get_pixel_color(
-    //             window_name,
-    //             ROCKSTAR_OFFSETS.verify_captcha_btn.x,
-    //             ROCKSTAR_OFFSETS.verify_captcha_btn.y,
-    //         )
-    //         .await?;
-
-    //         if color == 1683451 {
-    //             println!("Captcha button found!");
-    //             return Ok(());
-    //         } else {
-    //             println!("Captcha button not found!");
-    //             return Err("Captcha button not found!".into());
-    //         }
-    //     },
-    //     150,
-    //     25,
-    // )
-    // .await?;
-
-    // ghost_click(
-    //     window_name,
-    //     ROCKSTAR_OFFSETS.verify_captcha_btn.x,
-    //     ROCKSTAR_OFFSETS.verify_captcha_btn.y,
-    // )
-    // .await?;
-
-    // let mut image = myScreen.capture().unwrap();
     let image = my_screen.capture_area(805, 380, 305, 240).unwrap();
     let buffer = image.to_png(None).unwrap();
-    // convert to base64 and save to file
     fs::write(
         format!("{}-2.png", my_screen.display_info.id),
         buffer.clone(),
     )
     .unwrap();
     let base64 = general_purpose::STANDARD.encode(&buffer);
-    fs::write("captcha.txt", base64.clone()).unwrap();
 
-    // let mut params: HashMap<&str, JsonValue> = HashMap::new();
+    let mut post_params: HashMap<&str, Value> = HashMap::new();
 
-    // params.insert("key",                                                                                                                                                    JsonValue::Single("sub_1NFmnDCRwBwvt6ptOZH8VdJn".to_string()));
-    // params.insert("type", JsonValue::Single("funcaptcha".to_string()));
-    // params.insert("task", JsonValue::Single("Pick the image that is the correct way up".to_string()));
-    // let base64_string = "HQ9IjEwMCIgdmlld0JveD0iMCAwIDMy...";
-    // params.insert("image_data", JsonValue::List(vec![base64_string.to_string()]));
+    post_params.insert("key", Value::String("sub_1NFmnDCRwBwvt6ptOZH8VdJn".to_string()));
+    post_params.insert("type", Value::String("funcaptcha".to_string()));
+    post_params.insert("task", Value::String("Pick the image that is the correct way up".to_string()));
+    post_params.insert("image_data", Value::Array(vec![Value::String(base64)]));
+    let cookie_jar = Arc::new(reqwest::cookie::Jar::default());
+    let client = reqwest::Client::builder()
+        .cookie_provider(cookie_jar.clone())
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537")
+        .build()?;
+    
+    let res = client.post("https://api.nopecha.com/")
+        .json(&post_params)
+        .send()
+        .await?;
 
-    //     // Imprime para verificar
-    // for (key, value) in &params {
-    //     match value {
-    //         JsonValue::Single(s) => println!("{}: {}", key, s),
-    //         JsonValue::List(l) => println!("{}: {:?}", key, l),
-    //     }
+    let parsed_response: Value = serde_json::from_str(&res.text().await?).unwrap();
+    let solving_id = parsed_response["data"].as_str().unwrap();
+
+    if solving_id.len() == 64 {
+        println!("Captcha can be solved, starting solving!: {}", solving_id);
+    } else {
+        panic!("Captcha not solved!");
+    }
+
+    let get_params = [
+        ("key", "sub_1NFmnDCRwBwvt6ptOZH8VdJn"),
+        ("id", solving_id)
+    ];
+
+
+    let res = client.get("https://api.nopecha.com/")
+        .query(&get_params)
+        .send()
+        .await?;
+
+
+    let response = res.text().await?;
+
+
+    let parsed_response: Value = serde_json::from_str(&response).unwrap();
+    let data: &Value = &parsed_response["data"];
+
+    if !data.is_array() {
+        panic!("Captcha cant be solve!");
+    }
+
+    let data = data.as_array().unwrap();
+
+    println!("Response of solved captcha: {:?}", data);
+
+    captcha_click(data).await?;
+
+    Ok(())
+}
+
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // loop {
+    //     let client_point = _print_mouse_position_relative_to_window(ROCKSTAR_OFFSETS.window_name);
+    //     let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, client_point.x, client_point.y).await.unwrap_or_else(|_| 0);
+    //     println!("Pixel color: {}", pixel_color);
+    //     tokio::time::sleep(std::time::Duration::from_millis(4000)).await;
     // }
 
-    let mut params: HashMap<&str, Value> = HashMap::new();
+    let account = Account {
+        email: "cristian124421@gmail.com".to_string(),
+        password:                                                                                                                                                   "Lokesea124!".to_string(),
+    };
 
-    params.insert("key", Value::String("sub_1NFmnDCRwBwvt6ptOZH8VdJn".to_string()));
-    params.insert("type", Value::String("funcaptcha".to_string()));
-    params.insert("task", Value::String("Pick the image that is the correct way up".to_string()));
-
-    let base64_string = "HQ9IjEwMCIgdmlld0JveD0iMCAwIDMy...";
-    params.insert("image_data", Value::Array(vec![Value::String(base64_string.to_string())]));
-
-
-    let client = reqwest::Client::new();
-    let res = client.post("https://api.nopecha.com/")
-    .json(&params)
-    .send()
+    ghost_click(
+        ROCKSTAR_OFFSETS.window_name,
+        ROCKSTAR_OFFSETS.email.x,
+        ROCKSTAR_OFFSETS.email.y,
+    )
+    .await?;
+    keyboard_write(&account.email).await?;
+    ghost_click(
+        ROCKSTAR_OFFSETS.window_name,
+        ROCKSTAR_OFFSETS.password.x,
+        ROCKSTAR_OFFSETS.password.y,
+    )
+    .await?;
+    keyboard_write(&account.password).await?;
+    ghost_click(
+        ROCKSTAR_OFFSETS.window_name,
+        ROCKSTAR_OFFSETS.sign_in.x,
+        ROCKSTAR_OFFSETS.sign_in.y,
+    )
     .await?;
 
-    println!("Response: {:?}", res.text().await?);
+    make_async_loop_fn_with_retries(
+        || async {
+            println!("Trying to find captcha button...");
+
+            let color = get_pixel_color(
+                ROCKSTAR_OFFSETS.window_name,
+                ROCKSTAR_OFFSETS.verify_captcha_btn.x,
+                ROCKSTAR_OFFSETS.verify_captcha_btn.y,
+            )
+            .await?;
+
+            if color == 1683451 {
+                println!("Captcha button found!");
+                return Ok(());
+            } else {
+                println!("Captcha button not found!");
+                return Err("Captcha button not found!".into());
+            }
+        },
+        200,
+        25,
+    )
+    .await?;
+
+    ghost_click(
+        ROCKSTAR_OFFSETS.window_name,
+        ROCKSTAR_OFFSETS.verify_captcha_btn.x,
+        ROCKSTAR_OFFSETS.verify_captcha_btn.y,
+    )
+    .await?;
 
 
     Ok(())
