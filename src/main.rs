@@ -1,6 +1,8 @@
 extern crate serde_json;
 use serde::__private::from_utf8_lossy;
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
 use image::{ImageBuffer, Rgb};
 use memflex::types::ModuleInfoWithName;
 use screenshots::{Compression, Screen};
@@ -61,7 +63,7 @@ static ROCKSTAR_OFFSETS: Offsets = Offsets {
     verify_captcha_messages: [
         VerifyCaptcha {
             position: POINT { x: 527, y: 256 }, 
-            validation: VerifyCaptchaMessage { color: 3387392, message: "try_again" },
+            validation: VerifyCaptchaMessage { color: 3387392, message: "try_again_click" },
         },
         VerifyCaptcha {
             position: POINT { x: 682, y: 329 }, 
@@ -309,7 +311,6 @@ async fn ghost_click(window_name: &str, x: i32, y: i32) -> Result<(), Box<dyn st
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         SendInput(1, &mut input_down, std::mem::size_of::<INPUT>() as i32);
         SendInput(1, &mut input_up, std::mem::size_of::<INPUT>() as i32);
-        // SendInput(1, &mut input_move_back, std::mem::size_of::<INPUT>() as i32);
     }
 
     Ok(())
@@ -318,10 +319,10 @@ async fn ghost_click(window_name: &str, x: i32, y: i32) -> Result<(), Box<dyn st
 async fn captcha_click(captcha_array: &Vec<Value>) -> Result<(), Box<dyn std::error::Error>> {
     let mut captcha_index = 0;
     for captcha in captcha_array {
-        captcha_index += 1;
         if captcha.as_bool().unwrap() {
             break;
         }
+        captcha_index += 1;
     }
 
     println!("Captcha index: {}", captcha_index);
@@ -359,70 +360,97 @@ where
     }
 }
 
-// #[tokio::main]
-// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//     println!("Starting...");
-//     #[cfg(windows)]
-//     if let Ok(p) = memflex::external::open_process_by_name(
-//         "_GTAProcess.exe",
-//         false,
-//         memflex::types::win::PROCESS_ALL_ACCESS,
-//     ) {
-//         println!("p: {:?}", p.name());
+struct HWIDInfo {
+    machineHashIndex: String,
+    entitlementId: String,
+}
 
-//         let module = p.find_module("XAudio2_8.dll").unwrap();
-//         println!("module: {:?}", module);
+async fn hook_machine_hash() -> Result<(HWIDInfo), Box<dyn std::error::Error>> {
+    println!("Starting Hooking into GTA5.exe");
+    #[cfg(windows)]
+    if let Ok(p) = memflex::external::open_process_by_name(
+        "_GTAProcess.exe",
+        false,
+        memflex::types::win::PROCESS_ALL_ACCESS,
+    ) {
+        println!("p: {:?}", p.name());
 
-//         let buffer_size = 64 * 1024;
-//         let mut buffer = vec![0u8; buffer_size];
+        let module = p.find_module("XAudio2_8.dll");
+        
+        if module.is_err() {
+            return Err("XAudio2_8.dll not found".into());
+        }
 
-//         let start_address = module.base as usize;
-//         let end_address = module.base as usize + 8 * 1024 * 1024 * 1204;
+        let module = module.unwrap();
 
-//         let re = Regex::new(r"machineHashIndex=([^&]+)").unwrap();
+        println!("module: {:?}", module);
 
-//         println!(
-//             "Starting exploring from 0x{:?} to 0x{:?} 8GB",
-//             start_address, end_address
-//         );
+        let buffer_size = 64 * 1024;
+        let mut buffer = vec![0u8; buffer_size];
 
-//         println!(
-//             "Starting exploring from 0x{:?} to 0x{:?} 8GB",
-//             start_address, end_address
-//         );
-//         println!("[Checking: 0x{:?}]", start_address);
+        let start_address = module.base as usize;
+        let end_address = module.base as usize + 8 * 1024 * 1024 * 1204;
 
-//         std::io::stdout().flush().unwrap();
+        let re_machine = Regex::new(r"machineHashIndex=([^&]+)").unwrap();
+        let re_entitlement = Regex::new(r"entitlementId=([^&]*)").unwrap();
 
-//         for address in (start_address..end_address).step_by(buffer.len()) {
-//             if p.read_buf(address, &mut buffer).is_ok() {
-//                 let result_string = String::from_utf8_lossy(&buffer);
+        println!(
+            "Starting exploring from 0x{:?} to 0x{:?} 8GB",
+            start_address, end_address
+        );
 
-//                 if let Some(index) = result_string.find("machineHash") {
-//                     let relevant_part = &result_string[index..];
-//                     if let Some(captures) = re.captures(relevant_part) {
-//                         let machine_hash_index = captures.get(1).unwrap().as_str();
-//                         print!("\x1B[s\nMachine hash index found: {:?} at 0x{:x}", machine_hash_index, address);
-//                         print!("\x1B[u[Checking: 0x{:x}]\r", address);
-//                         std::io::stdout().flush().unwrap();
-//                     }
-//                 }
+        println!(
+            "Starting exploring from 0x{:?} to 0x{:?} 8GB",
+            start_address, end_address
+        );
+        println!("[Checking: 0x{:?}]", start_address);
 
-//                 print!("[Checking: 0x{:x}]\r", address);
-//                 std::io::stdout().flush().unwrap();
-//             }
-//         }
+        std::io::stdout().flush().unwrap();
 
-//         println!("\n\n");
-//     } else {
-//         println!("Process not found");
-//     }
+        for address in (start_address..end_address).step_by(buffer.len()) {
+            if p.read_buf(address, &mut buffer).is_ok() {
+                let result_string = String::from_utf8_lossy(&buffer);
 
-//     println!("Press any key to continue...");
-//     let _ = std::io::stdin().read_line(&mut String::new());
+                if let Some(index) = result_string.find("machineHash") {
+                    if let Some(index_a) = result_string.find("entitlementId") {
+                        let relevant_part = &result_string[index..];
+                        let mut founded_data = HWIDInfo {
+                            machineHashIndex: "".to_string(),
+                            entitlementId: "".to_string(),
+                        };
+                        if let Some(captures) = re_machine.captures(relevant_part) {
+                            let machine_hash_index = captures.get(1).unwrap().as_str();
+                            print!("\x1B[s\nMachine hash index found: {:?} at 0x{:x}", machine_hash_index, address);
+                            print!("\x1B[u[Checking: 0x{:x}]\r", address);
+                            std::io::stdout().flush().unwrap();
+                            founded_data.machineHashIndex = machine_hash_index.to_string();
+                        }
 
-//     Ok(())
-// }
+                        let relevant_part = &result_string[index_a..];
+                        if let Some(captures) = re_entitlement.captures(relevant_part) {
+                            let entitlement_id = captures.get(1).unwrap().as_str();
+                            print!("\x1B[s\nEntitlement id found: {:?} at 0x{:x}", entitlement_id, address);
+                            print!("\x1B[u[Checking: 0x{:x}]\r", address);
+                            std::io::stdout().flush().unwrap();
+                            founded_data.entitlementId = entitlement_id.to_string();
+                            println!("\n\n\n\n\n");
+                            return Ok(founded_data);
+                        }
+                    }
+                }
+
+                print!("[Checking: 0x{:x}]\r", address);
+                std::io::stdout().flush().unwrap();
+            }
+        }
+
+        println!("\n\n");
+    } else {
+        println!("Process not found");
+    }
+
+    Err("Query failed".into())
+}
 
 enum JsonValue {
     Single(String),
@@ -475,83 +503,110 @@ async fn get_captcha_message() -> Result<String, Box<dyn std::error::Error>> {
     Ok("No message found".into())
 }
 
-async fn solve_captcha() -> Result<(), Box<dyn std::error::Error>> {
-    let screens = Screen::all().unwrap();
-    let my_screen: &Screen = &screens[0];
-    let image = my_screen.capture_area(805, 380, 305, 240).unwrap();
-    let buffer = image.to_png(None).unwrap();
-    fs::write(
-        format!("{}-2.png", my_screen.display_info.id),
-        buffer.clone(),
-    )
-    .unwrap();
-    let base64 = general_purpose::STANDARD.encode(&buffer);
+fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>>>> {
+    Box::pin(async {
+        let screens = Screen::all().unwrap();
+        let my_screen: &Screen = &screens[0];
+        let image = my_screen.capture_area(805, 380, 305, 240).unwrap();
+        let buffer = image.to_png(None).unwrap();
+        fs::write(
+            format!("{}-2.png", my_screen.display_info.id),
+            buffer.clone(),
+        )
+        .unwrap();
+        let base64 = general_purpose::STANDARD.encode(&buffer);
 
-    let mut post_params: HashMap<&str, Value> = HashMap::new();
+        let mut post_params: HashMap<&str, Value> = HashMap::new();
 
-    post_params.insert("key", Value::String("sub_1NFmnDCRwBwvt6ptOZH8VdJn".to_string()));
-    post_params.insert("type", Value::String("funcaptcha".to_string()));
-    post_params.insert("task", Value::String("Pick the image that is the correct way up".to_string()));
-    post_params.insert("image_data", Value::Array(vec![Value::String(base64)]));
-    let cookie_jar = Arc::new(reqwest::cookie::Jar::default());
-    let client = reqwest::Client::builder()
-        .cookie_provider(cookie_jar.clone())
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537")
-        .build()?;
-    
-    let res = client.post("https://api.nopecha.com/")
-        .json(&post_params)
-        .send()
-        .await?;
+        post_params.insert("key", Value::String("sub_1NFmnDCRwBwvt6ptOZH8VdJn".to_string()));
+        post_params.insert("type", Value::String("funcaptcha".to_string()));
+        post_params.insert("task", Value::String("Pick the image that is the correct way up".to_string()));
+        post_params.insert("image_data", Value::Array(vec![Value::String(base64)]));
+        let cookie_jar = Arc::new(reqwest::cookie::Jar::default());
+        let client = reqwest::Client::builder()
+            .cookie_provider(cookie_jar.clone())
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537")
+            .build()?;
+        
+        let res = client.post("https://api.nopecha.com/")
+            .json(&post_params)
+            .send()
+            .await?;
 
-    let parsed_response: Value = serde_json::from_str(&res.text().await?).unwrap();
-    let solving_id = parsed_response["data"].as_str().unwrap();
+        let parsed_response: Value = serde_json::from_str(&res.text().await?).unwrap();
+        let solving_id = parsed_response["data"].as_str().unwrap();
 
-    if solving_id.len() == 64 {
-        println!("Captcha can be solved, starting solving!: {}", solving_id);
-    } else {
-        panic!("Captcha not solved!");
-    }
+        if solving_id.len() == 64 {
+            println!("Captcha can be solved, starting solving!: {}", solving_id);
+        } else {
+            panic!("Captcha not solved!");
+        }
 
-    let get_params = [
-        ("key", "sub_1NFmnDCRwBwvt6ptOZH8VdJn"),
-        ("id", solving_id)
-    ];
-
-
-    let res = client.get("https://api.nopecha.com/")
-        .query(&get_params)
-        .send()
-        .await?;
+        let get_params = [
+            ("key", "sub_1NFmnDCRwBwvt6ptOZH8VdJn"),
+            ("id", solving_id)
+        ];
 
 
-    let response = res.text().await?;
+        let res = client.get("https://api.nopecha.com/")
+            .query(&get_params)
+            .send()
+            .await?;
 
 
-    let parsed_response: Value = serde_json::from_str(&response).unwrap();
-    let data: &Value = &parsed_response["data"];
+        let response = res.text().await?;
 
-    if !data.is_array() {
-        panic!("Captcha cant be solve!");
-    }
 
-    let data = data.as_array().unwrap();
+        let parsed_response: Value = serde_json::from_str(&response).unwrap();
+        let data: &Value = &parsed_response["data"];
 
-    println!("Response of solved captcha: {:?}", data);
+        if !data.is_array() {
+            panic!("Captcha cant be solve!");
+        }
 
-    captcha_click(data).await?;
+        let data = data.as_array().unwrap();
 
-    Ok(())
+        println!("Response of solved captcha: {:?}", data);
+
+        captcha_click(data).await?;
+
+        let captcha_message = get_captcha_message().await?;
+
+        println!("Captcha message: {}", captcha_message);
+
+        if captcha_message == "try_again_click" {
+            println!("Captcha failed, trying again...");
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            ghost_click(
+                ROCKSTAR_OFFSETS.window_name,
+                ROCKSTAR_OFFSETS.verify_captcha_btn.x,
+                ROCKSTAR_OFFSETS.verify_captcha_btn.y,
+            )
+            .await?;
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            return solve_captcha().await;
+        } else if captcha_message == "try_again" {
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            return solve_captcha().await;
+        } else if captcha_message == "solved" {
+            println!("Captcha solved!");
+            return Ok(());
+        } else {
+            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Captcha message not found!")));
+        }
+    })
 }
 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // loop {
-    //     let client_point = _print_mouse_position_relative_to_window(ROCKSTAR_OFFSETS.window_name);
-    //     let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, client_point.x, client_point.y).await.unwrap_or_else(|_| 0);
-    //     println!("Pixel color: {}", pixel_color);
-    //     tokio::time::sleep(std::time::Duration::from_millis(4000)).await;
+        // let hwid_info = hook_machine_hash().await?;
+        // println!("Machine hash: {}  EntitlementID: {}", hwid_info.machineHashIndex, hwid_info.entitlementId);
+        // let client_point = _print_mouse_position_relative_to_window(ROCKSTAR_OFFSETS.window_name);
+        // let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, client_point.x, client_point.y).await.unwrap_or_else(|_| 0);
+        // println!("Pixel color: {}", pixel_color);
+        // tokio::time::sleep(std::time::Duration::from_millis(4000)).await;
     // }
 
     let account = Account {
@@ -608,6 +663,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ROCKSTAR_OFFSETS.window_name,
         ROCKSTAR_OFFSETS.verify_captcha_btn.x,
         ROCKSTAR_OFFSETS.verify_captcha_btn.y,
+    )
+    .await?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    solve_captcha().await?;
+
+    println!("Captcha solved! i think :)");
+
+    make_async_loop_fn_with_retries(
+        || async {
+            let hwid_info = hook_machine_hash().await?;
+
+            if hwid_info.machineHashIndex.len() == 31 {
+                println!("Machine hash found!");
+                println!("Machine hash: {}  EntitlementID: {}", hwid_info.machineHashIndex, hwid_info.entitlementId);
+                return Ok(());
+            } else {
+                println!("Machine hash not found!");
+                return Err("Machine hash not found!".into());
+            }
+        },
+        2000,
+        5,
     )
     .await?;
 
