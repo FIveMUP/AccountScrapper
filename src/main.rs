@@ -48,9 +48,10 @@ struct Offsets {
     email: POINT,
     password: POINT,
     sign_in: POINT,
+    verify_mail: POINT,
     verify_captcha_btn: POINT,
     verify_captcha_buttons: [POINT; 6],
-    verify_captcha_messages: [VerifyCaptcha; 3],
+    verify_captcha_messages: [VerifyCaptcha; 5],
 }
 
 static ROCKSTAR_OFFSETS: Offsets = Offsets {
@@ -58,6 +59,7 @@ static ROCKSTAR_OFFSETS: Offsets = Offsets {
     email: POINT { x: 350, y: 245 },
     password: POINT { x: 335, y: 300 },
     sign_in: POINT { x: 845, y: 380 },
+    verify_mail: POINT { x: 946, y: 436 },
     verify_captcha_btn: POINT { x: 630, y: 397 },
     verify_captcha_buttons: [POINT { x: 535, y: 275 }, POINT { x: 635, y: 275 }, POINT { x: 735, y: 275 }, POINT { x: 535, y: 375 }, POINT { x: 635, y: 375 }, POINT { x: 735, y: 375 }],
     verify_captcha_messages: [
@@ -72,6 +74,14 @@ static ROCKSTAR_OFFSETS: Offsets = Offsets {
         VerifyCaptcha {
             position: POINT { x: 657, y: 310 }, 
             validation: VerifyCaptchaMessage { color: 3048749, message: "solved" },
+        },
+        VerifyCaptcha {
+            position: POINT { x: 303, y: 440 }, 
+            validation: VerifyCaptchaMessage { color: 526525, message: "verify_mail" },
+        },
+        VerifyCaptcha {
+            position: POINT { x: 303, y: 440 }, 
+            validation: VerifyCaptchaMessage { color: 666, message: "window_not_found" },
         },
 
     ],
@@ -157,7 +167,7 @@ async fn get_pixel_color(
     let hwnd = unsafe { FindWindowW(std::ptr::null(), _wide_name_null_terminated.as_ptr()) };
     if hwnd.is_null() {
         eprintln!("Window not found!");
-        panic!("Window not found!");
+        return Ok(666 as u32);
     }
 
     let mut point = POINT { x, y };
@@ -457,10 +467,7 @@ enum JsonValue {
     List(Vec<String>)
 }
 
-async fn get_captcha_message() -> Result<String, Box<dyn std::error::Error>> {
-
-    // iter on ROCKSTAR_OFFSETS.captcha_messages and ghost click on coords, if the color match then return message
-    
+async fn get_captcha_message() -> Result<String, Box<dyn std::error::Error>> {    
     let final_message = RwLock::new(String::new());
     let result = make_async_loop_fn_with_retries(
             || async {
@@ -597,22 +604,27 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
     })
 }
 
+// async fn verify_mail
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // loop {
-        // let hwid_info = hook_machine_hash().await?;
-        // println!("Machine hash: {}  EntitlementID: {}", hwid_info.machineHashIndex, hwid_info.entitlementId);
-        // let client_point = _print_mouse_position_relative_to_window(ROCKSTAR_OFFSETS.window_name);
-        // let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, client_point.x, client_point.y).await.unwrap_or_else(|_| 0);
-        // println!("Pixel color: {}", pixel_color);
-        // tokio::time::sleep(std::time::Duration::from_millis(4000)).await;
+    //     let client_point = _print_mouse_position_relative_to_window(ROCKSTAR_OFFSETS.window_name);
+    //     let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, client_point.x, client_point.y).await.unwrap_or_else(|_| 0);
+    //     println!("Pixel color: {}", pixel_color);
+    //     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     // }
 
     let account = Account {
         email: "cristian124421@gmail.com".to_string(),
-        password:                                                                                                                                                   "Lokesea124!".to_string(),
+        password: "Lokesea124!".to_string(),
     };
+
+    // let account = Account {
+    //     email: "JAZWFsZ7lM@projectnoxius.xyz".to_string(),
+    //     password: "Noxius0nTop-YU1LQzY!@".to_string(),
+    // };
 
     ghost_click(
         ROCKSTAR_OFFSETS.window_name,
@@ -635,7 +647,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    make_async_loop_fn_with_retries(
+    let captchaFound = make_async_loop_fn_with_retries(
         || async {
             println!("Trying to find captcha button...");
 
@@ -657,7 +669,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         200,
         25,
     )
-    .await?;
+    .await;
+
+    if captchaFound.is_err() {
+        println!("Captcha button not found!, trying to check if captcha has been skipped...");
+    
+        make_async_loop_fn_with_retries(
+            || async {
+                let hwid_info = hook_machine_hash().await?;
+    
+                if hwid_info.machineHashIndex.len() == 31 {
+                    println!("Machine hash found!");
+                    println!("Machine hash: {}  EntitlementID: {}", hwid_info.machineHashIndex, hwid_info.entitlementId);
+                    return Ok(());
+                } else {
+                    println!("Machine hash not found!");
+                    return Err("Machine hash not found!".into());
+                }
+            },
+            2000,
+            5,
+        )
+        .await?;
+    
+        return Ok(());
+    }
 
     ghost_click(
         ROCKSTAR_OFFSETS.window_name,
@@ -671,6 +707,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     solve_captcha().await?;
 
     println!("Captcha solved! i think :)");
+
+    tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
+    
+    let captcha_message = get_captcha_message().await?;
+
+    if captcha_message == "verify_mail" {
+        println!("Needs to verify the mail!");
+    }
 
     make_async_loop_fn_with_retries(
         || async {
@@ -689,7 +733,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         5,
     )
     .await?;
-
 
     Ok(())
 }
