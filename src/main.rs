@@ -1,15 +1,18 @@
 extern crate serde_json;
 use serde::__private::from_utf8_lossy;
 use serde_json::Value;
-use std::future::Future;
+use tokio::fs::OpenOptions;
+use std::env;
+use std::path::Path;
+use std::{future::Future, ops::Deref};
 use std::pin::Pin;
 use image::{ImageBuffer, Rgb};
 use memflex::types::ModuleInfoWithName;
 use screenshots::{Compression, Screen};
-use std::{ffi::OsStr, io::Write, os::windows::prelude::OsStrExt, ptr::null_mut, collections::HashMap, str::from_utf8_unchecked, sync::{Arc, Mutex}};
+use std::{ffi::OsStr, io::Write, os::windows::prelude::OsStrExt, ptr::null_mut, collections::HashMap, str::from_utf8_unchecked, sync::{Arc}};
 use base64::{Engine as _, engine::{self, general_purpose}, alphabet};
 use std::{fs, time::Instant};
-use tokio::{io::stdout, sync::RwLock};
+use tokio::{io::stdout, sync::RwLock, sync::Mutex};
 use winapi::{
     shared::windef::{HBITMAP, HDC, HWND, POINT, RECT},
     um::{
@@ -27,6 +30,7 @@ use winapi::{
     },
 };
 use regex::Regex;
+mod mail_verifier;
 
 struct Account {
     email: String,
@@ -48,10 +52,11 @@ struct Offsets {
     email: POINT,
     password: POINT,
     sign_in: POINT,
-    verify_mail: POINT,
     verify_captcha_btn: POINT,
+    verify_mail_input: POINT,
+    verify_mail_btn: POINT,
     verify_captcha_buttons: [POINT; 6],
-    verify_captcha_messages: [VerifyCaptcha; 5],
+    verify_captcha_messages: [VerifyCaptcha; 6],
 }
 
 static ROCKSTAR_OFFSETS: Offsets = Offsets {
@@ -59,8 +64,9 @@ static ROCKSTAR_OFFSETS: Offsets = Offsets {
     email: POINT { x: 350, y: 245 },
     password: POINT { x: 335, y: 300 },
     sign_in: POINT { x: 845, y: 380 },
-    verify_mail: POINT { x: 946, y: 436 },
     verify_captcha_btn: POINT { x: 630, y: 397 },
+    verify_mail_input: POINT { x: 333, y: 285 },
+    verify_mail_btn: POINT { x: 845, y: 350 },
     verify_captcha_buttons: [POINT { x: 535, y: 275 }, POINT { x: 635, y: 275 }, POINT { x: 735, y: 275 }, POINT { x: 535, y: 375 }, POINT { x: 635, y: 375 }, POINT { x: 735, y: 375 }],
     verify_captcha_messages: [
         VerifyCaptcha {
@@ -82,6 +88,10 @@ static ROCKSTAR_OFFSETS: Offsets = Offsets {
         VerifyCaptcha {
             position: POINT { x: 303, y: 440 }, 
             validation: VerifyCaptchaMessage { color: 666, message: "window_not_found" },
+        },
+        VerifyCaptcha {
+            position: POINT { x: 897, y: 362 }, 
+            validation: VerifyCaptchaMessage { color: 16777215, message: "verify_mail_code" },
         },
 
     ],
@@ -224,8 +234,7 @@ async fn ghost_click(window_name: &str, x: i32, y: i32) -> Result<(), Box<dyn st
 
     let hwnd = unsafe { FindWindowW(std::ptr::null(), wide_name_null_terminated.as_ptr()) };
     if hwnd.is_null() {
-        eprintln!("Window not found!");
-        panic!("Window not found!");
+        println!("Window not found!");
     }
 
     unsafe {
@@ -370,9 +379,10 @@ where
     }
 }
 
+#[derive(Clone)]
 struct HWIDInfo {
-    machineHashIndex: String,
-    entitlementId: String,
+    machine_hash_index: String,
+    entitlement_id: String,
 }
 
 async fn hook_machine_hash() -> Result<(HWIDInfo), Box<dyn std::error::Error>> {
@@ -409,48 +419,46 @@ async fn hook_machine_hash() -> Result<(HWIDInfo), Box<dyn std::error::Error>> {
             start_address, end_address
         );
 
-        println!(
-            "Starting exploring from 0x{:?} to 0x{:?} 8GB",
-            start_address, end_address
-        );
-        println!("[Checking: 0x{:?}]", start_address);
-
         std::io::stdout().flush().unwrap();
+
+        let mut founded_data = HWIDInfo {
+            machine_hash_index: "".to_string(),
+            entitlement_id: "".to_string(),
+        };
 
         for address in (start_address..end_address).step_by(buffer.len()) {
             if p.read_buf(address, &mut buffer).is_ok() {
                 let result_string = String::from_utf8_lossy(&buffer);
 
                 if let Some(index) = result_string.find("machineHash") {
-                    if let Some(index_a) = result_string.find("entitlementId") {
-                        let relevant_part = &result_string[index..];
-                        let mut founded_data = HWIDInfo {
-                            machineHashIndex: "".to_string(),
-                            entitlementId: "".to_string(),
-                        };
-                        if let Some(captures) = re_machine.captures(relevant_part) {
-                            let machine_hash_index = captures.get(1).unwrap().as_str();
-                            print!("\x1B[s\nMachine hash index found: {:?} at 0x{:x}", machine_hash_index, address);
-                            print!("\x1B[u[Checking: 0x{:x}]\r", address);
-                            std::io::stdout().flush().unwrap();
-                            founded_data.machineHashIndex = machine_hash_index.to_string();
-                        }
+                    let relevant_part = &result_string[index..];
+                    if let Some(captures) = re_machine.captures(relevant_part) {
+                        let machine_hash_index = captures.get(1).unwrap().as_str();
+                        print!("\x1B[s\nMachine hash index found: {:?} at 0x{:x}", machine_hash_index, address);
+                        print!("\x1B[u[Checking: 0x{:x}]\r", address);
+                        std::io::stdout().flush().unwrap();
+                        founded_data.machine_hash_index = machine_hash_index.to_string();
+                    }
+                }
 
-                        let relevant_part = &result_string[index_a..];
-                        if let Some(captures) = re_entitlement.captures(relevant_part) {
-                            let entitlement_id = captures.get(1).unwrap().as_str();
-                            print!("\x1B[s\nEntitlement id found: {:?} at 0x{:x}", entitlement_id, address);
-                            print!("\x1B[u[Checking: 0x{:x}]\r", address);
-                            std::io::stdout().flush().unwrap();
-                            founded_data.entitlementId = entitlement_id.to_string();
-                            println!("\n\n\n\n\n");
-                            return Ok(founded_data);
-                        }
+                if let Some(index) = result_string.find("entitlementId") {
+                    let relevant_part = &result_string[index..];
+                    if let Some(captures) = re_entitlement.captures(relevant_part) {
+                        let entitlement_id = captures.get(1).unwrap().as_str();
+                        print!("\x1B[s\nEntitlement id found: {:?} at 0x{:x}", entitlement_id, address);
+                        print!("\x1B[u[Checking: 0x{:x}]\r", address);
+                        std::io::stdout().flush().unwrap();
+                        founded_data.entitlement_id = entitlement_id.to_string();
                     }
                 }
 
                 print!("[Checking: 0x{:x}]\r", address);
                 std::io::stdout().flush().unwrap();
+
+                if !founded_data.machine_hash_index.is_empty() && !founded_data.entitlement_id.is_empty() {
+                    println!("\n\nFound machine hash index: {:?} and entitlement id: {:?} at 0x{:x}", founded_data.machine_hash_index, founded_data.entitlement_id, address);
+                    return Ok(founded_data);
+                }
             }
         }
 
@@ -568,7 +576,7 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
         let data: &Value = &parsed_response["data"];
 
         if !data.is_array() {
-            panic!("Captcha cant be solve!");
+            return solve_captcha().await;
         }
 
         let data = data.as_array().unwrap();
@@ -604,27 +612,12 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
     })
 }
 
-// async fn verify_mail
+async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std::error::Error>> {
 
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // loop {
-    //     let client_point = _print_mouse_position_relative_to_window(ROCKSTAR_OFFSETS.window_name);
-    //     let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, client_point.x, client_point.y).await.unwrap_or_else(|_| 0);
-    //     println!("Pixel color: {}", pixel_color);
-    //     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    // }
-
-    let account = Account {
-        email: "cristian124421@gmail.com".to_string(),
-        password: "Lokesea124!".to_string(),
-    };
-
-    // let account = Account {
-    //     email: "JAZWFsZ7lM@projectnoxius.xyz".to_string(),
-    //     password: "Noxius0nTop-YU1LQzY!@".to_string(),
-    // };
+    let final_hwid = Arc::new(RwLock::new(HWIDInfo {
+        machine_hash_index: "".to_string(),
+        entitlement_id: "".to_string(),
+    }));
 
     ghost_click(
         ROCKSTAR_OFFSETS.window_name,
@@ -662,7 +655,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Captcha button found!");
                 return Ok(());
             } else {
+                let verify_mail_offset = &ROCKSTAR_OFFSETS.verify_captcha_messages[5];
                 println!("Captcha button not found!");
+                let color = get_pixel_color(
+                    ROCKSTAR_OFFSETS.window_name,
+                    verify_mail_offset.position.x,
+                    verify_mail_offset.position.y
+                ).await?;
+
+                println!("Color: {}, message: {}", color, verify_mail_offset.validation.message);
+
+                if color == verify_mail_offset.validation.color {
+                    println!("Needs to verify mail with code!");
+                    tokio::time::sleep(std::time::Duration::from_millis(8500)).await;
+                    let verification_code = mail_verifier::get_mail_code(&account.email, &account.password).await?;
+                    
+                    println!("Verification code: {:?}", verification_code);
+                    
+                    
+                    ghost_click(
+                        ROCKSTAR_OFFSETS.window_name,
+                        ROCKSTAR_OFFSETS.verify_mail_input.x,
+                        ROCKSTAR_OFFSETS.verify_mail_input.y,
+                    )
+                    .await?; 
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    keyboard_write(&verification_code).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    ghost_click(
+                        ROCKSTAR_OFFSETS.window_name,
+                        ROCKSTAR_OFFSETS.verify_mail_btn.x,
+                        ROCKSTAR_OFFSETS.verify_mail_btn.y,
+                    ).await?;
+
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    ghost_click(
+                        ROCKSTAR_OFFSETS.window_name,
+                        ROCKSTAR_OFFSETS.sign_in.x,
+                        ROCKSTAR_OFFSETS.sign_in.y,
+                    ).await?;
+
+                    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+                    return Ok(());
+                }
+                
+
                 return Err("Captcha button not found!".into());
             }
         },
@@ -678,9 +716,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || async {
                 let hwid_info = hook_machine_hash().await?;
     
-                if hwid_info.machineHashIndex.len() == 31 {
+                if hwid_info.machine_hash_index.len() >= 31 && hwid_info.entitlement_id.len() >= 31 {
                     println!("Machine hash found!");
-                    println!("Machine hash: {}  EntitlementID: {}", hwid_info.machineHashIndex, hwid_info.entitlementId);
+                    println!("Machine hash: {}  EntitlementID: {}", hwid_info.machine_hash_index, hwid_info.entitlement_id);
+                    final_hwid.write().await.machine_hash_index = hwid_info.machine_hash_index;
+                    final_hwid.write().await.entitlement_id = hwid_info.entitlement_id;
                     return Ok(());
                 } else {
                     println!("Machine hash not found!");
@@ -691,8 +731,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             5,
         )
         .await?;
-    
-        return Ok(());
+
+
+        let hwid_info = final_hwid.read().await.clone();
+        return Ok(hwid_info);
     }
 
     ghost_click(
@@ -701,10 +743,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ROCKSTAR_OFFSETS.verify_captcha_btn.y,
     )
     .await?;
-
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
+    
     solve_captcha().await?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+
+    let captcha_message = get_captcha_message().await?;
+
+    if captcha_message == "verify_mail_code" {
+        println!("Needs to verify mail with code!");
+        tokio::time::sleep(std::time::Duration::from_millis(8500)).await;
+        let verification_code: String = mail_verifier::get_mail_code(&account.email, &account.password).await?;
+        
+        println!("Verification code: {:?}", verification_code);
+        
+        
+        ghost_click(
+            ROCKSTAR_OFFSETS.window_name,
+            ROCKSTAR_OFFSETS.verify_mail_input.x,
+            ROCKSTAR_OFFSETS.verify_mail_input.y,
+        )
+        .await?; 
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        keyboard_write(&verification_code).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        ghost_click(
+            ROCKSTAR_OFFSETS.window_name,
+            ROCKSTAR_OFFSETS.verify_mail_btn.x,
+            ROCKSTAR_OFFSETS.verify_mail_btn.y,
+        ).await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        ghost_click(
+            ROCKSTAR_OFFSETS.window_name,
+            ROCKSTAR_OFFSETS.sign_in.x,
+            ROCKSTAR_OFFSETS.sign_in.y,
+        ).await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(4500)).await;
+        
+        ghost_click(
+            ROCKSTAR_OFFSETS.window_name,
+            ROCKSTAR_OFFSETS.verify_captcha_btn.x,
+            ROCKSTAR_OFFSETS.verify_captcha_btn.y,
+        )
+        .await?;
+        
+        solve_captcha().await?;
+    
+    }
 
     println!("Captcha solved! i think :)");
 
@@ -720,9 +807,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || async {
             let hwid_info = hook_machine_hash().await?;
 
-            if hwid_info.machineHashIndex.len() == 31 {
+            if hwid_info.machine_hash_index.len() >= 31 && hwid_info.entitlement_id.len() >= 31  {
                 println!("Machine hash found!");
-                println!("Machine hash: {}  EntitlementID: {}", hwid_info.machineHashIndex, hwid_info.entitlementId);
+                println!("Machine hash: {}  EntitlementID: {}", hwid_info.machine_hash_index, hwid_info.entitlement_id);
+                final_hwid.write().await.machine_hash_index = hwid_info.machine_hash_index;
+                final_hwid.write().await.entitlement_id = hwid_info.entitlement_id;
                 return Ok(());
             } else {
                 println!("Machine hash not found!");
@@ -733,6 +822,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         5,
     )
     .await?;
+
+    let hwid_info = final_hwid.read().await.clone();
+    Ok(hwid_info)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // loop {
+    //     let client_point = _print_mouse_position_relative_to_window(ROCKSTAR_OFFSETS.window_name);
+    //     let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, client_point.x, client_point.y).await.unwrap_or_else(|_| 0);
+    //     println!("Pixel color: {}", pixel_color);
+    //     println!("Client point: x: {} y: {}", client_point.x, client_point.y);
+    //     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // }
+
+    let to_check_accounts = fs::read_to_string("accounts.txt")?;
+    let to_check_accounts = to_check_accounts.split("\n").collect::<Vec<&str>>();
+
+    let checked_accounts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let checked_accounts_file = fs::read_to_string("output_accounts.txt")?;
+
+    for account in checked_accounts_file.split("\n") {
+        checked_accounts.lock().await.push(account.to_string());
+        println!("Account {} loaded to output_db!", account);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    for account in to_check_accounts {
+        let account_splitted = account.split(":").collect::<Vec<&str>>();
+        let email = account_splitted[0];
+        let password = account_splitted[1];
+        println!("Check account {}", account);
+        
+        if checked_accounts_file.contains(email) {
+            println!("Account {} already checked!", email);
+            continue;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+        
+        let digital_entitlements_path = format!("{}\\AppData\\Local\\DigitalEntitlements", env::var("USERPROFILE").unwrap());
+        if Path::new(&digital_entitlements_path.clone()).exists() {
+            fs::remove_dir_all(digital_entitlements_path.clone())?;
+        }
+
+        let fivem_path = format!("{}\\AppData\\Local\\FiveM\\FiveM.exe", env::var("USERPROFILE").unwrap());
+        println!("FiveM path: {}", fivem_path);
+        tokio::process::Command::new(fivem_path)
+            .spawn()
+            .expect("Failed to start FiveM.exe");
+
+
+        while !Path::new(&digital_entitlements_path).exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        
+        println!("FiveM ready to be hooked!");
+
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+
+        let hwid_info = retrieve_account_data(Account {
+            email: email.to_string(), password: password.to_string(),
+        }).await?;
+
+        tokio::process::Command::new("taskkill")
+            .args(&["/F", "/IM", "FiveM.exe"])
+            .spawn()
+            .expect("Failed to kill FiveM.exe");
+
+        let check_string = format!("{}:{}:{}:{}", hwid_info.machine_hash_index, hwid_info.entitlement_id, email, password);
+        println!("Account {} checked!", check_string);
+
+        checked_accounts.lock().await.push(check_string);
+
+        let flash_format = checked_accounts.lock().await.join("\n");
+        fs::write("output_accounts.txt", flash_format)?;
+    
+        println!("Machine hash: {}  EntitlementID: {} Email: {}  Password: {}", hwid_info.machine_hash_index, hwid_info.entitlement_id, email, password);
+    }
 
     Ok(())
 }
