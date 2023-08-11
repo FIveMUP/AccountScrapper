@@ -434,6 +434,9 @@ async fn hook_machine_hash() -> Result<(HWIDInfo), Box<dyn std::error::Error>> {
                     let relevant_part = &result_string[index..];
                     if let Some(captures) = re_machine.captures(relevant_part) {
                         let machine_hash_index = captures.get(1).unwrap().as_str();
+                        if machine_hash_index.len() > 44 {
+                            continue;
+                        }
                         print!("\x1B[s\nMachine hash index found: {:?} at 0x{:x}", machine_hash_index, address);
                         print!("\x1B[u[Checking: 0x{:x}]\r", address);
                         std::io::stdout().flush().unwrap();
@@ -445,6 +448,9 @@ async fn hook_machine_hash() -> Result<(HWIDInfo), Box<dyn std::error::Error>> {
                     let relevant_part = &result_string[index..];
                     if let Some(captures) = re_entitlement.captures(relevant_part) {
                         let entitlement_id = captures.get(1).unwrap().as_str();
+                        if entitlement_id.len() > 35 {
+                            continue;
+                        }
                         print!("\x1B[s\nEntitlement id found: {:?} at 0x{:x}", entitlement_id, address);
                         print!("\x1B[u[Checking: 0x{:x}]\r", address);
                         std::io::stdout().flush().unwrap();
@@ -455,7 +461,7 @@ async fn hook_machine_hash() -> Result<(HWIDInfo), Box<dyn std::error::Error>> {
                 print!("[Checking: 0x{:x}]\r", address);
                 std::io::stdout().flush().unwrap();
 
-                if !founded_data.machine_hash_index.is_empty() && !founded_data.entitlement_id.is_empty() {
+                if !founded_data.machine_hash_index.is_empty() && !founded_data.entitlement_id.is_empty() && founded_data.machine_hash_index.len() <= 44 && founded_data.entitlement_id.len() <= 35 {
                     println!("\n\nFound machine hash index: {:?} and entitlement id: {:?} at 0x{:x}", founded_data.machine_hash_index, founded_data.entitlement_id, address);
                     return Ok(founded_data);
                 }
@@ -546,8 +552,13 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
         let res = client.post("https://api.nopecha.com/")
             .json(&post_params)
             .send()
-            .await?;
+            .await;
 
+        if res.is_err() {
+            return solve_captcha().await;
+        } 
+        
+        let res = res.unwrap();
         let parsed_response: Value = serde_json::from_str(&res.text().await?).unwrap();
         let solving_id = parsed_response["data"].as_str().unwrap();
 
@@ -566,9 +577,13 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
         let res = client.get("https://api.nopecha.com/")
             .query(&get_params)
             .send()
-            .await?;
+            .await;
 
+        if res.is_err() {
+            return solve_captcha().await;
+        } 
 
+        let res = res.unwrap();
         let response = res.text().await?;
 
 
@@ -607,7 +622,7 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
             println!("Captcha solved!");
             return Ok(());
         } else {
-            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Captcha message not found!")));
+            return Ok(());
         }
     })
 }
@@ -712,7 +727,7 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
     if captchaFound.is_err() {
         println!("Captcha button not found!, trying to check if captcha has been skipped...");
     
-        make_async_loop_fn_with_retries(
+        let result = make_async_loop_fn_with_retries(
             || async {
                 let hwid_info = hook_machine_hash().await?;
     
@@ -730,8 +745,11 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
             2000,
             5,
         )
-        .await?;
+        .await;
 
+        if result.is_err() {
+            println!("Error hooking machine hash retries for account: {}", account.email);
+        }
 
         let hwid_info = final_hwid.read().await.clone();
         return Ok(hwid_info);
@@ -803,11 +821,11 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
         println!("Needs to verify the mail!");
     }
 
-    make_async_loop_fn_with_retries(
+    let result = make_async_loop_fn_with_retries(
         || async {
             let hwid_info = hook_machine_hash().await?;
 
-            if hwid_info.machine_hash_index.len() >= 31 && hwid_info.entitlement_id.len() >= 31  {
+            if hwid_info.machine_hash_index.len() >= 31 && hwid_info.entitlement_id.len() >= 31 {
                 println!("Machine hash found!");
                 println!("Machine hash: {}  EntitlementID: {}", hwid_info.machine_hash_index, hwid_info.entitlement_id);
                 final_hwid.write().await.machine_hash_index = hwid_info.machine_hash_index;
@@ -821,7 +839,11 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
         2000,
         5,
     )
-    .await?;
+    .await;
+
+    if result.is_err() {
+        println!("Error hooking machine hash retries for account: {}", account.email);
+    }
 
     let hwid_info = final_hwid.read().await.clone();
     Ok(hwid_info)
@@ -859,6 +881,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Account {} already checked!", email);
             continue;
         }
+
         tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
         
         let digital_entitlements_path = format!("{}\\AppData\\Local\\DigitalEntitlements", env::var("USERPROFILE").unwrap());
@@ -889,6 +912,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .args(&["/F", "/IM", "FiveM.exe"])
             .spawn()
             .expect("Failed to kill FiveM.exe");
+
+        if hwid_info.machine_hash_index.len() < 31 || hwid_info.entitlement_id.len() < 31 {
+            println!("Account {} failed!", email);
+            // append to failed accounts.txt   
+            
+            let failed_accounts = fs::read_to_string("failed_accounts.txt")?;
+            let mut failed_accounts = failed_accounts.split("\n").collect::<Vec<&str>>();
+            let string_push = format!("{}:{}", email, password);
+            failed_accounts.push(&string_push);
+            let failed_accounts = failed_accounts.join("\n");
+            fs::write("failed_accounts.txt", failed_accounts)?;
+
+            continue;
+        }
+
 
         let check_string = format!("{}:{}:{}:{}", hwid_info.machine_hash_index, hwid_info.entitlement_id, email, password);
         println!("Account {} checked!", check_string);
