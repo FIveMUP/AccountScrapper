@@ -1,27 +1,25 @@
 extern crate serde_json;
-use serde::__private::from_utf8_lossy;
 use serde_json::Value;
-use tokio::fs::OpenOptions;
+
 use std::env;
 use std::path::Path;
-use std::{future::Future, ops::Deref};
+use std::{future::Future};
 use std::pin::Pin;
-use image::{ImageBuffer, Rgb};
-use memflex::types::ModuleInfoWithName;
-use screenshots::{Compression, Screen};
-use std::{ffi::OsStr, io::Write, os::windows::prelude::OsStrExt, ptr::null_mut, collections::HashMap, str::from_utf8_unchecked, sync::{Arc}};
-use base64::{Engine as _, engine::{self, general_purpose}, alphabet};
-use std::{fs, time::Instant};
-use tokio::{io::stdout, sync::RwLock, sync::Mutex};
+
+
+use screenshots::{Screen};
+use std::{io::Write, collections::HashMap, sync::{Arc}};
+use base64::{Engine as _, engine::{general_purpose}};
+use std::{fs};
+use tokio::{sync::RwLock, sync::Mutex};
 use winapi::{
-    shared::windef::{HBITMAP, HDC, HWND, POINT, RECT},
+    shared::windef::{POINT},
     um::{
         wingdi::{
-            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, GetDIBits, GetPixel, BITMAPINFO,
-            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGB, RGBQUAD, SRCCOPY,
+            GetPixel,
         },
         winuser::{
-            ClientToScreen, FindWindowW, GetCursorPos, GetDC, GetDesktopWindow,
+            ClientToScreen, FindWindowW, GetCursorPos, GetDC,
             GetForegroundWindow, GetSystemMetrics, ReleaseDC, ScreenToClient, SendInput,
             SetForegroundWindow, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_UNICODE,
             MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
@@ -385,7 +383,7 @@ struct HWIDInfo {
     entitlement_id: String,
 }
 
-async fn hook_machine_hash() -> Result<(HWIDInfo), Box<dyn std::error::Error>> {
+async fn hook_machine_hash() -> Result<HWIDInfo, Box<dyn std::error::Error>> {
     println!("Starting Hooking into GTA5.exe");
     #[cfg(windows)]
     if let Ok(p) = memflex::external::open_process_by_name(
@@ -491,7 +489,7 @@ async fn get_captcha_message() -> Result<String, Box<dyn std::error::Error>> {
                 let color = message.validation.color;
                 let message = message.validation.message;
                 
-                let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, position.x, position.y).await?;
+                let _pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, position.x, position.y).await?;
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, position.x, position.y).await?;
                 
@@ -761,6 +759,8 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
         ROCKSTAR_OFFSETS.verify_captcha_btn.y,
     )
     .await?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
     
     solve_captcha().await?;
 
@@ -806,6 +806,8 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
             ROCKSTAR_OFFSETS.verify_captcha_btn.y,
         )
         .await?;
+    
+        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
         
         solve_captcha().await?;
     
@@ -868,7 +870,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for account in checked_accounts_file.split("\n") {
         checked_accounts.lock().await.push(account.to_string());
         println!("Account {} loaded to output_db!", account);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
     for account in to_check_accounts {
@@ -881,6 +882,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Account {} already checked!", email);
             continue;
         }
+
+        
+        tokio::process::Command::new("taskkill")
+        .args(&["/F", "/IM", "FiveM.exe"])
+        .spawn()
+        .expect("Failed to kill FiveM.exe");
 
         tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
         
@@ -902,7 +909,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         println!("FiveM ready to be hooked!");
 
-        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(6000)).await;
 
         let hwid_info = retrieve_account_data(Account {
             email: email.to_string(), password: password.to_string(),
