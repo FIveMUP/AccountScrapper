@@ -19,3 +19,4 @@ rand = "0.8.5"
 serde_json = "1.0.104"
 anyhow = "1.0.72"
 fantoccini = { version = "0.19.3", features = ["rustls-tls"]}
+winreg = "0.50.0"

@@ -3,21 +3,22 @@ use serde_json::Value;
 
 use std::env;
 use std::path::Path;
-use std::{future::Future};
+use std::future::Future;
 use std::pin::Pin;
+use std::io::Read;
+use tokio::signal::ctrl_c;
+use winreg::enums::*;
+use winreg::RegKey;
 
-
-use screenshots::{Screen};
-use std::{io::Write, collections::HashMap, sync::{Arc}};
-use base64::{Engine as _, engine::{general_purpose}};
-use std::{fs};
+use screenshots::Screen;
+use std::{io::Write, collections::HashMap, sync::Arc};
+use base64::{Engine as _, engine::general_purpose};
+use std::fs;
 use tokio::{sync::RwLock, sync::Mutex};
 use winapi::{
-    shared::windef::{POINT},
+    shared::windef::POINT,
     um::{
-        wingdi::{
-            GetPixel,
-        },
+        wingdi::GetPixel,
         winuser::{
             ClientToScreen, FindWindowW, GetCursorPos, GetDC,
             GetForegroundWindow, GetSystemMetrics, ReleaseDC, ScreenToClient, SendInput,
@@ -383,6 +384,37 @@ struct HWIDInfo {
     entitlement_id: String,
 }
 
+async fn update_account_data(mail: &str, status: &str, hwid_info: HWIDInfo) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .build()?;
+
+    let pc_name = env::var("USERNAME").unwrap();
+
+    let params = [
+        ("mail", mail),
+        ("status", status),
+        ("machineHash", hwid_info.machine_hash_index.as_str()),
+        ("entitlementId", hwid_info.entitlement_id.as_str()),
+        ("pc_name", pc_name.as_str()),
+        ("auth_token", "califatogang")
+    ];
+
+    let res = client.post("http://127.0.0.1:3001/api/accountStock/pending/update")
+        .query(&params)
+        .send()
+        .await?;
+
+    if res.status().as_u16() != 200 {
+        println!("{}", res.text().await?);
+        return Err("Error updating account data".into());
+    } else {
+        println!("Account data updated on DB!");
+    }
+
+    Ok(())
+}
+
 async fn hook_machine_hash() -> Result<HWIDInfo, Box<dyn std::error::Error>> {
     println!("Starting Hooking into GTA5.exe");
     #[cfg(windows)]
@@ -472,11 +504,6 @@ async fn hook_machine_hash() -> Result<HWIDInfo, Box<dyn std::error::Error>> {
     }
 
     Err("Query failed".into())
-}
-
-enum JsonValue {
-    Single(String),
-    List(Vec<String>)
 }
 
 async fn get_captcha_message() -> Result<String, Box<dyn std::error::Error>> {    
@@ -653,7 +680,7 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
     )
     .await?;
 
-    let captchaFound = make_async_loop_fn_with_retries(
+    let captcha_found = make_async_loop_fn_with_retries(
         || async {
             println!("Trying to find captcha button...");
 
@@ -722,7 +749,7 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
     )
     .await;
 
-    if captchaFound.is_err() {
+    if captcha_found.is_err() {
         println!("Captcha button not found!, trying to check if captcha has been skipped...");
     
         let result = make_async_loop_fn_with_retries(
@@ -861,28 +888,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     // }
 
-    let to_check_accounts = fs::read_to_string("accounts.txt")?;
-    let to_check_accounts = to_check_accounts.split("\n").collect::<Vec<&str>>();
+    // let system = RegKey::predef(HKEY_LOCAL_MACHINE)
+    // .open_subkey("HARDWARE\\DESCRIPTION\\System")?;
+    // for (name, value) in system.enum_values().map(|x| x.unwrap()) {
+    //     println!("{} = {:?}", name, value);
+    // }
 
-    let checked_accounts = Arc::new(Mutex::new(Vec::<String>::new()));
-    let checked_accounts_file = fs::read_to_string("output_accounts.txt")?;
+    let pc_username = env::var("USERNAME").unwrap();
+    let current_checking_mail = Arc::new(RwLock::new(String::new()));
 
-    for account in checked_accounts_file.split("\n") {
-        checked_accounts.lock().await.push(account.to_string());
-        println!("Account {} loaded to output_db!", account);
-    }
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537")
+        .build()?;
 
-    for account in to_check_accounts {
-        let account_splitted = account.split(":").collect::<Vec<&str>>();
-        let email = account_splitted[0];
-        let password = account_splitted[1];
-        println!("Check account {}", account);
+    let cloned_mail = current_checking_mail.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        println!("Ctrl-C received, press again to exit");
+        tokio::signal::ctrl_c().await.unwrap();
         
-        if checked_accounts_file.contains(email) {
-            println!("Account {} already checked!", email);
+        // Clone mail and read it
+        let mail = cloned_mail.read().await.clone();
+        update_account_data(&mail, "error", HWIDInfo { machine_hash_index: "".into(), entitlement_id: "".into() }).await.unwrap();
+
+        println!("Exiting...");
+        std::process::exit(0);
+    });
+
+    loop {
+        println!("[ :) ] Checking Accounts as: {}", pc_username);
+
+        let params = [
+            ("pc_name", pc_username.as_str()),
+            ("auth_token", "califatogang")
+        ];
+
+        let check_data = client.get("http://127.0.0.1:3001/api/accountStock/pending/getNext")
+            .query(&params)
+            .send()
+            .await;
+
+        if check_data.is_err() {
+            println!("Error getting accounts to check: {:?}", check_data);
+            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
             continue;
         }
 
+        let check_data = check_data.unwrap();
+        
+        if check_data.status().as_u16() != 200 {
+            println!("Error getting accounts to check: {:?}", check_data);
+            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+            continue;
+        }
+
+        let check_data_json: Value = serde_json::from_str(&check_data.text().await?).unwrap();
+
+        let email = check_data_json["email"].as_str().unwrap();
+        let password = check_data_json["password"].as_str().unwrap();
+        let message = check_data_json["message"].as_str().unwrap();
+        println!("{}", message);
+
+        current_checking_mail.write().await.push_str(&email);
         
         tokio::process::Command::new("taskkill")
         .args(&["/F", "/IM", "FiveM.exe"])
@@ -913,7 +980,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let hwid_info = retrieve_account_data(Account {
             email: email.to_string(), password: password.to_string(),
-        }).await?;
+        }).await;
+
+        if hwid_info.is_err() {
+            println!("Error retrieving account: {}", email);
+            update_account_data(&email, "error_getting_hwid", HWIDInfo { machine_hash_index: "".into(), entitlement_id: "".into() }).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+            continue;
+        }
+
+        let hwid_info = hwid_info.unwrap();
 
         tokio::process::Command::new("taskkill")
             .args(&["/F", "/IM", "FiveM.exe"])
@@ -922,29 +998,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if hwid_info.machine_hash_index.len() < 31 || hwid_info.entitlement_id.len() < 31 {
             println!("Account {} failed!", email);
-            // append to failed accounts.txt   
-            
-            let failed_accounts = fs::read_to_string("failed_accounts.txt")?;
-            let mut failed_accounts = failed_accounts.split("\n").collect::<Vec<&str>>();
-            let string_push = format!("{}:{}", email, password);
-            failed_accounts.push(&string_push);
-            let failed_accounts = failed_accounts.join("\n");
-            fs::write("failed_accounts.txt", failed_accounts)?;
-
+            update_account_data(&email, "error_getting_hwid_too_long", HWIDInfo { machine_hash_index: "".into(), entitlement_id: "".into() }).await.unwrap();
             continue;
         }
 
+        update_account_data(&email, "checked", hwid_info.clone()).await.unwrap();
 
         let check_string = format!("{}:{}:{}:{}", hwid_info.machine_hash_index, hwid_info.entitlement_id, email, password);
         println!("Account {} checked!", check_string);
-
-        checked_accounts.lock().await.push(check_string);
-
-        let flash_format = checked_accounts.lock().await.join("\n");
-        fs::write("output_accounts.txt", flash_format)?;
-    
+        
         println!("Machine hash: {}  EntitlementID: {} Email: {}  Password: {}", hwid_info.machine_hash_index, hwid_info.entitlement_id, email, password);
     }
-
-    Ok(())
 }

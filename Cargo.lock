@@ -19,6 +19,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "winapi",
+ "winreg 0.50.0",
 ]
 
 [[package]]
