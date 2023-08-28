@@ -1,34 +1,66 @@
 extern crate serde_json;
 use serde_json::Value;
-
+use std::{
+    ffi::{c_ulong, c_ulonglong, CString},
+    mem::transmute,
+};
+use windows::{
+    core::PCSTR,
+    Win32::{
+        Foundation::{NTSTATUS, STATUS_FLOAT_MULTIPLE_FAULTS},
+        System::LibraryLoader::{GetProcAddress, LoadLibraryA},
+    },
+};
+type RtlAdjustPrivilige = unsafe extern "C" fn(
+    privilge: c_ulong,
+    enable: bool,
+    currentThread: bool,
+    enabled: *mut bool,
+) -> NTSTATUS;
+type NtRaiseHardError = unsafe extern "C" fn(
+    errorStatus: NTSTATUS,
+    numberOfParams: c_ulong,
+    unicodeStrParamMask: c_ulong,
+    params: *const c_ulonglong,
+    responseOption: c_ulong,
+    response: *mut c_ulong,
+) -> i64;
+use iced::{
+    theme::Palette,
+    Theme,
+    widget::{button, column, container, text},
+    window::PlatformSpecific,
+    Length, Color, Application, executor, Command,
+};
+use iced::{Alignment, Element, Sandbox, Settings};
 use std::env;
-use std::path::Path;
 use std::future::Future;
-use std::pin::Pin;
 use std::io::Read;
+use std::path::Path;
+use std::pin::Pin;
 use tokio::signal::ctrl_c;
 use winreg::enums::*;
 use winreg::RegKey;
 
+use base64::{engine::general_purpose, Engine as _};
+use regex::Regex;
 use screenshots::Screen;
-use std::{io::Write, collections::HashMap, sync::Arc};
-use base64::{Engine as _, engine::general_purpose};
 use std::fs;
-use tokio::{sync::RwLock, sync::Mutex};
+use std::{collections::HashMap, io::Write, sync::Arc};
+use tokio::{sync::Mutex, sync::RwLock};
 use winapi::{
     shared::windef::POINT,
     um::{
         wingdi::GetPixel,
         winuser::{
-            ClientToScreen, FindWindowW, GetCursorPos, GetDC,
-            GetForegroundWindow, GetSystemMetrics, ReleaseDC, ScreenToClient, SendInput,
-            SetForegroundWindow, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_UNICODE,
-            MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
-            MOUSEINPUT, SM_CXSCREEN, SM_CYSCREEN,
+            ClientToScreen, FindWindowW, GetCursorPos, GetDC, GetForegroundWindow,
+            GetSystemMetrics, ReleaseDC, ScreenToClient, SendInput, SetForegroundWindow, INPUT,
+            INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
+            MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT, SM_CXSCREEN,
+            SM_CYSCREEN,
         },
     },
 };
-use regex::Regex;
 mod mail_verifier;
 
 struct Account {
@@ -36,7 +68,7 @@ struct Account {
     password: String,
 }
 
-struct  VerifyCaptchaMessage {
+struct VerifyCaptchaMessage {
     color: u32,
     message: &'static str,
 }
@@ -66,35 +98,58 @@ static ROCKSTAR_OFFSETS: Offsets = Offsets {
     verify_captcha_btn: POINT { x: 630, y: 397 },
     verify_mail_input: POINT { x: 333, y: 285 },
     verify_mail_btn: POINT { x: 845, y: 350 },
-    verify_captcha_buttons: [POINT { x: 535, y: 275 }, POINT { x: 635, y: 275 }, POINT { x: 735, y: 275 }, POINT { x: 535, y: 375 }, POINT { x: 635, y: 375 }, POINT { x: 735, y: 375 }],
+    verify_captcha_buttons: [
+        POINT { x: 535, y: 275 },
+        POINT { x: 635, y: 275 },
+        POINT { x: 735, y: 275 },
+        POINT { x: 535, y: 375 },
+        POINT { x: 635, y: 375 },
+        POINT { x: 735, y: 375 },
+    ],
     verify_captcha_messages: [
         VerifyCaptcha {
-            position: POINT { x: 527, y: 256 }, 
-            validation: VerifyCaptchaMessage { color: 3387392, message: "try_again_click" },
+            position: POINT { x: 527, y: 256 },
+            validation: VerifyCaptchaMessage {
+                color: 3387392,
+                message: "try_again_click",
+            },
         },
         VerifyCaptcha {
-            position: POINT { x: 682, y: 329 }, 
-            validation: VerifyCaptchaMessage { color: 0, message: "try_again" },
+            position: POINT { x: 682, y: 329 },
+            validation: VerifyCaptchaMessage {
+                color: 0,
+                message: "try_again",
+            },
         },
         VerifyCaptcha {
-            position: POINT { x: 657, y: 310 }, 
-            validation: VerifyCaptchaMessage { color: 3048749, message: "solved" },
+            position: POINT { x: 657, y: 310 },
+            validation: VerifyCaptchaMessage {
+                color: 3048749,
+                message: "solved",
+            },
         },
         VerifyCaptcha {
-            position: POINT { x: 303, y: 440 }, 
-            validation: VerifyCaptchaMessage { color: 526525, message: "verify_mail" },
+            position: POINT { x: 303, y: 440 },
+            validation: VerifyCaptchaMessage {
+                color: 526525,
+                message: "verify_mail",
+            },
         },
         VerifyCaptcha {
-            position: POINT { x: 303, y: 440 }, 
-            validation: VerifyCaptchaMessage { color: 666, message: "window_not_found" },
+            position: POINT { x: 303, y: 440 },
+            validation: VerifyCaptchaMessage {
+                color: 666,
+                message: "window_not_found",
+            },
         },
         VerifyCaptcha {
-            position: POINT { x: 897, y: 362 }, 
-            validation: VerifyCaptchaMessage { color: 16777215, message: "verify_mail_code" },
+            position: POINT { x: 897, y: 362 },
+            validation: VerifyCaptchaMessage {
+                color: 16777215,
+                message: "verify_mail_code",
+            },
         },
-
     ],
-
 };
 
 async fn keyboard_write(text: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -155,8 +210,7 @@ fn _print_mouse_position_relative_to_window(window_name: &str) -> POINT {
 
     println!(
         "Mouse position relative to window: ({}, {}), real position: ({}, {})",
-        point.x, point.y,
-        real_point.x, real_point.y
+        point.x, point.y, real_point.x, real_point.y
     );
 
     POINT {
@@ -222,7 +276,6 @@ async fn get_pixel_color(
     // let r = (color & 0x000000FF) as u8;
     // let g = ((color & 0x0000FF00) >> 8) as u8;
     // let b = ((color & 0x00FF0000) >> 16) as u8;
-
 
     Ok(color)
 }
@@ -351,7 +404,8 @@ async fn captcha_click(captcha_array: &Vec<Value>) -> Result<(), Box<dyn std::er
         "Rockstar Games - Social Club",
         captcha_button_pos.x,
         captcha_button_pos.y,
-    ).await?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -384,7 +438,11 @@ struct HWIDInfo {
     entitlement_id: String,
 }
 
-async fn update_account_data(mail: &str, status: &str, hwid_info: HWIDInfo) -> Result<(), Box<dyn std::error::Error>> {
+async fn update_account_data(
+    mail: &str,
+    status: &str,
+    hwid_info: HWIDInfo,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
         .build()?;
@@ -397,10 +455,11 @@ async fn update_account_data(mail: &str, status: &str, hwid_info: HWIDInfo) -> R
         ("machineHash", hwid_info.machine_hash_index.as_str()),
         ("entitlementId", hwid_info.entitlement_id.as_str()),
         ("pc_name", pc_name.as_str()),
-        ("auth_token", "califatogang")
+        ("auth_token", "califatogang"),
     ];
 
-    let res = client.post("http://127.0.0.1:3001/api/accountStock/pending/update")
+    let res = client
+        .post("https://api.fivemup.io/api/accountStock/pending/update")
         .query(&params)
         .send()
         .await?;
@@ -426,7 +485,7 @@ async fn hook_machine_hash() -> Result<HWIDInfo, Box<dyn std::error::Error>> {
         println!("p: {:?}", p.name());
 
         let module = p.find_module("XAudio2_8.dll");
-        
+
         if module.is_err() {
             return Err("XAudio2_8.dll not found".into());
         }
@@ -467,7 +526,10 @@ async fn hook_machine_hash() -> Result<HWIDInfo, Box<dyn std::error::Error>> {
                         if machine_hash_index.len() > 44 {
                             continue;
                         }
-                        print!("\x1B[s\nMachine hash index found: {:?} at 0x{:x}", machine_hash_index, address);
+                        print!(
+                            "\x1B[s\nMachine hash index found: {:?} at 0x{:x}",
+                            machine_hash_index, address
+                        );
                         print!("\x1B[u[Checking: 0x{:x}]\r", address);
                         std::io::stdout().flush().unwrap();
                         founded_data.machine_hash_index = machine_hash_index.to_string();
@@ -481,7 +543,10 @@ async fn hook_machine_hash() -> Result<HWIDInfo, Box<dyn std::error::Error>> {
                         if entitlement_id.len() > 35 {
                             continue;
                         }
-                        print!("\x1B[s\nEntitlement id found: {:?} at 0x{:x}", entitlement_id, address);
+                        print!(
+                            "\x1B[s\nEntitlement id found: {:?} at 0x{:x}",
+                            entitlement_id, address
+                        );
                         print!("\x1B[u[Checking: 0x{:x}]\r", address);
                         std::io::stdout().flush().unwrap();
                         founded_data.entitlement_id = entitlement_id.to_string();
@@ -491,8 +556,15 @@ async fn hook_machine_hash() -> Result<HWIDInfo, Box<dyn std::error::Error>> {
                 print!("[Checking: 0x{:x}]\r", address);
                 std::io::stdout().flush().unwrap();
 
-                if !founded_data.machine_hash_index.is_empty() && !founded_data.entitlement_id.is_empty() && founded_data.machine_hash_index.len() <= 44 && founded_data.entitlement_id.len() <= 35 {
-                    println!("\n\nFound machine hash index: {:?} and entitlement id: {:?} at 0x{:x}", founded_data.machine_hash_index, founded_data.entitlement_id, address);
+                if !founded_data.machine_hash_index.is_empty()
+                    && !founded_data.entitlement_id.is_empty()
+                    && founded_data.machine_hash_index.len() <= 44
+                    && founded_data.entitlement_id.len() <= 35
+                {
+                    println!(
+                        "\n\nFound machine hash index: {:?} and entitlement id: {:?} at 0x{:x}",
+                        founded_data.machine_hash_index, founded_data.entitlement_id, address
+                    );
                     return Ok(founded_data);
                 }
             }
@@ -506,20 +578,21 @@ async fn hook_machine_hash() -> Result<HWIDInfo, Box<dyn std::error::Error>> {
     Err("Query failed".into())
 }
 
-async fn get_captcha_message() -> Result<String, Box<dyn std::error::Error>> {    
+async fn get_captcha_message() -> Result<String, Box<dyn std::error::Error>> {
     let final_message = RwLock::new(String::new());
     let result = make_async_loop_fn_with_retries(
-            || async {
-
+        || async {
             for message in &ROCKSTAR_OFFSETS.verify_captcha_messages {
                 let position = message.position;
                 let color = message.validation.color;
                 let message = message.validation.message;
-                
-                let _pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, position.x, position.y).await?;
+
+                let _pixel_color =
+                    get_pixel_color(ROCKSTAR_OFFSETS.window_name, position.x, position.y).await?;
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let pixel_color = get_pixel_color(ROCKSTAR_OFFSETS.window_name, position.x, position.y).await?;
-                
+                let pixel_color =
+                    get_pixel_color(ROCKSTAR_OFFSETS.window_name, position.x, position.y).await?;
+
                 println!("Checking message: {:?}", message);
 
                 if pixel_color == color {
@@ -533,7 +606,6 @@ async fn get_captcha_message() -> Result<String, Box<dyn std::error::Error>> {
             } else {
                 return Err("Captcha message not found".into());
             }
-            
         },
         10,
         10,
@@ -564,27 +636,42 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
 
         let mut post_params: HashMap<&str, Value> = HashMap::new();
 
-        post_params.insert("key", Value::String("sub_1NFmnDCRwBwvt6ptOZH8VdJn".to_string()));
+        post_params.insert(
+            "key",
+            Value::String("sub_1NFmnDCRwBwvt6ptOZH8VdJn".to_string()),
+        );
         post_params.insert("type", Value::String("funcaptcha".to_string()));
-        post_params.insert("task", Value::String("Pick the image that is the correct way up".to_string()));
+        post_params.insert(
+            "task",
+            Value::String("Pick the image that is the correct way up".to_string()),
+        );
         post_params.insert("image_data", Value::Array(vec![Value::String(base64)]));
         let cookie_jar = Arc::new(reqwest::cookie::Jar::default());
         let client = reqwest::Client::builder()
             .cookie_provider(cookie_jar.clone())
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537")
             .build()?;
-        
-        let res = client.post("https://api.nopecha.com/")
+
+        let res = client
+            .post("https://api.nopecha.com/")
             .json(&post_params)
             .send()
             .await;
 
         if res.is_err() {
             return solve_captcha().await;
-        } 
-        
+        }
+
         let res = res.unwrap();
-        let parsed_response: Value = serde_json::from_str(&res.text().await?).unwrap();
+        let parsed_response = serde_json::from_str(&res.text().await?);
+
+        if parsed_response.is_err() {
+            println!("Error parsing response, retrying..");
+            return solve_captcha().await;
+        }
+
+        let parsed_response: Value = parsed_response.unwrap();
+
         let solving_id = parsed_response["data"].as_str().unwrap();
 
         if solving_id.len() == 64 {
@@ -593,26 +680,30 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
             panic!("Captcha not solved!");
         }
 
-        let get_params = [
-            ("key", "sub_1NFmnDCRwBwvt6ptOZH8VdJn"),
-            ("id", solving_id)
-        ];
+        let get_params = [("key", "sub_1NFmnDCRwBwvt6ptOZH8VdJn"), ("id", solving_id)];
 
-
-        let res = client.get("https://api.nopecha.com/")
+        let res = client
+            .get("https://api.nopecha.com/")
             .query(&get_params)
             .send()
             .await;
 
         if res.is_err() {
             return solve_captcha().await;
-        } 
+        }
 
         let res = res.unwrap();
         let response = res.text().await?;
 
+        let parsed_response = serde_json::from_str(&response);
 
-        let parsed_response: Value = serde_json::from_str(&response).unwrap();
+        if (parsed_response.is_err()) {
+            println!("Error parsing response: {}, retrying..", response);
+            return solve_captcha().await;
+        }
+
+        let parsed_response: Value = parsed_response.unwrap();
+
         let data: &Value = &parsed_response["data"];
 
         if !data.is_array() {
@@ -638,7 +729,7 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
                 ROCKSTAR_OFFSETS.verify_captcha_btn.y,
             )
             .await?;
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
             return solve_captcha().await;
         } else if captcha_message == "try_again" {
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -653,7 +744,6 @@ fn solve_captcha() -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error:
 }
 
 async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std::error::Error>> {
-
     let final_hwid = Arc::new(RwLock::new(HWIDInfo {
         machine_hash_index: "".to_string(),
         entitlement_id: "".to_string(),
@@ -700,25 +790,29 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
                 let color = get_pixel_color(
                     ROCKSTAR_OFFSETS.window_name,
                     verify_mail_offset.position.x,
-                    verify_mail_offset.position.y
-                ).await?;
+                    verify_mail_offset.position.y,
+                )
+                .await?;
 
-                println!("Color: {}, message: {}", color, verify_mail_offset.validation.message);
+                println!(
+                    "Color: {}, message: {}",
+                    color, verify_mail_offset.validation.message
+                );
 
                 if color == verify_mail_offset.validation.color {
                     println!("Needs to verify mail with code!");
-                    tokio::time::sleep(std::time::Duration::from_millis(8500)).await;
-                    let verification_code = mail_verifier::get_mail_code(&account.email, &account.password).await?;
-                    
+                    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+                    let verification_code =
+                        mail_verifier::get_mail_code(&account.email, &account.password).await?;
+
                     println!("Verification code: {:?}", verification_code);
-                    
-                    
+
                     ghost_click(
                         ROCKSTAR_OFFSETS.window_name,
                         ROCKSTAR_OFFSETS.verify_mail_input.x,
                         ROCKSTAR_OFFSETS.verify_mail_input.y,
                     )
-                    .await?; 
+                    .await?;
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     keyboard_write(&verification_code).await?;
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -726,20 +820,21 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
                         ROCKSTAR_OFFSETS.window_name,
                         ROCKSTAR_OFFSETS.verify_mail_btn.x,
                         ROCKSTAR_OFFSETS.verify_mail_btn.y,
-                    ).await?;
+                    )
+                    .await?;
 
                     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                     ghost_click(
                         ROCKSTAR_OFFSETS.window_name,
                         ROCKSTAR_OFFSETS.sign_in.x,
                         ROCKSTAR_OFFSETS.sign_in.y,
-                    ).await?;
+                    )
+                    .await?;
 
                     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 
                     return Ok(());
                 }
-                
 
                 return Err("Captcha button not found!".into());
             }
@@ -751,14 +846,18 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
 
     if captcha_found.is_err() {
         println!("Captcha button not found!, trying to check if captcha has been skipped...");
-    
+
         let result = make_async_loop_fn_with_retries(
             || async {
                 let hwid_info = hook_machine_hash().await?;
-    
-                if hwid_info.machine_hash_index.len() >= 31 && hwid_info.entitlement_id.len() >= 31 {
+
+                if hwid_info.machine_hash_index.len() >= 31 && hwid_info.entitlement_id.len() >= 31
+                {
                     println!("Machine hash found!");
-                    println!("Machine hash: {}  EntitlementID: {}", hwid_info.machine_hash_index, hwid_info.entitlement_id);
+                    println!(
+                        "Machine hash: {}  EntitlementID: {}",
+                        hwid_info.machine_hash_index, hwid_info.entitlement_id
+                    );
                     final_hwid.write().await.machine_hash_index = hwid_info.machine_hash_index;
                     final_hwid.write().await.entitlement_id = hwid_info.entitlement_id;
                     return Ok(());
@@ -773,13 +872,18 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
         .await;
 
         if result.is_err() {
-            println!("Error hooking machine hash retries for account: {}", account.email);
+            println!(
+                "Error hooking machine hash retries for account: {}",
+                account.email
+            );
         }
 
         let hwid_info = final_hwid.read().await.clone();
         return Ok(hwid_info);
     }
 
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    
     ghost_click(
         ROCKSTAR_OFFSETS.window_name,
         ROCKSTAR_OFFSETS.verify_captcha_btn.x,
@@ -788,7 +892,7 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
     .await?;
 
     tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-    
+
     solve_captcha().await?;
 
     tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
@@ -798,17 +902,17 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
     if captcha_message == "verify_mail_code" {
         println!("Needs to verify mail with code!");
         tokio::time::sleep(std::time::Duration::from_millis(8500)).await;
-        let verification_code: String = mail_verifier::get_mail_code(&account.email, &account.password).await?;
-        
+        let verification_code: String =
+            mail_verifier::get_mail_code(&account.email, &account.password).await?;
+
         println!("Verification code: {:?}", verification_code);
-        
-        
+
         ghost_click(
             ROCKSTAR_OFFSETS.window_name,
             ROCKSTAR_OFFSETS.verify_mail_input.x,
             ROCKSTAR_OFFSETS.verify_mail_input.y,
         )
-        .await?; 
+        .await?;
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         keyboard_write(&verification_code).await?;
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -816,34 +920,35 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
             ROCKSTAR_OFFSETS.window_name,
             ROCKSTAR_OFFSETS.verify_mail_btn.x,
             ROCKSTAR_OFFSETS.verify_mail_btn.y,
-        ).await?;
+        )
+        .await?;
 
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         ghost_click(
             ROCKSTAR_OFFSETS.window_name,
             ROCKSTAR_OFFSETS.sign_in.x,
             ROCKSTAR_OFFSETS.sign_in.y,
-        ).await?;
+        )
+        .await?;
 
         tokio::time::sleep(std::time::Duration::from_millis(4500)).await;
-        
+
         ghost_click(
             ROCKSTAR_OFFSETS.window_name,
             ROCKSTAR_OFFSETS.verify_captcha_btn.x,
             ROCKSTAR_OFFSETS.verify_captcha_btn.y,
         )
         .await?;
-    
+
         tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-        
+
         solve_captcha().await?;
-    
     }
 
     println!("Captcha solved! i think :)");
 
     tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
-    
+
     let captcha_message = get_captcha_message().await?;
 
     if captcha_message == "verify_mail" {
@@ -856,7 +961,10 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
 
             if hwid_info.machine_hash_index.len() >= 31 && hwid_info.entitlement_id.len() >= 31 {
                 println!("Machine hash found!");
-                println!("Machine hash: {}  EntitlementID: {}", hwid_info.machine_hash_index, hwid_info.entitlement_id);
+                println!(
+                    "Machine hash: {}  EntitlementID: {}",
+                    hwid_info.machine_hash_index, hwid_info.entitlement_id
+                );
                 final_hwid.write().await.machine_hash_index = hwid_info.machine_hash_index;
                 final_hwid.write().await.entitlement_id = hwid_info.entitlement_id;
                 return Ok(());
@@ -871,11 +979,100 @@ async fn retrieve_account_data(account: Account) -> Result<HWIDInfo, Box<dyn std
     .await;
 
     if result.is_err() {
-        println!("Error hooking machine hash retries for account: {}", account.email);
+        println!(
+            "Error hooking machine hash retries for account: {}",
+            account.email
+        );
     }
 
     let hwid_info = final_hwid.read().await.clone();
     Ok(hwid_info)
+}
+
+#[derive(Debug, Clone)]
+enum Message {
+    Tick(String),
+}
+
+struct uiData {
+    message: String,
+}
+
+impl Application for uiData {
+    type Message = Message;
+    type Executor = executor::Default;
+    type Theme = Theme;
+    type Flags = ();
+
+    fn new(_flags: ()) -> (Self, Command<Message>) {
+        (
+            uiData {
+                message: "Hello World!".to_string(),
+            },
+            Command::none(),
+        )
+    }
+
+    fn title(&self) -> String {
+        String::from("FiveMUP Checker :)")
+    }
+
+    fn theme(&self) -> iced::Theme {
+        iced::Theme::custom(Palette {
+            background: Color::TRANSPARENT,
+            ..Palette::DARK
+        })
+    }
+
+    fn update(&mut self, message: Message) -> Command<Message> {
+        match message {
+            Message::Tick(local_time) => {
+                self.message = "xD".to_string();
+            }
+        }
+
+        Command::none()
+    }
+
+    fn view(&self) -> Element<Message> {
+        let text_cont = text("0 \n4.39€").size(25);
+
+        container(text_cont)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(iced::theme::Container::Transparent)
+            .center_x()
+            .center_y()
+            .into()
+    }
+}
+
+async fn start_iced_layout(countMessage: Arc<RwLock<String>>) {
+    let default_settings = Settings::default();
+    let screens = Screen::all().unwrap();
+    let my_screen: &Screen = &screens[0];
+    let counter = uiData::run(Settings {
+        id: default_settings.id,
+        window: iced::window::Settings {
+            size: (150, 150),
+            position: iced::window::Position::Specific((my_screen.display_info.width - 200) as i32, (my_screen.display_info.y - 40) as i32),
+            min_size: None,
+            max_size: None,
+            visible: true,
+            resizable: false,
+            decorations: false,
+            transparent: true,
+            level: iced::window::Level::AlwaysOnTop,
+            icon: None,
+            platform_specific: PlatformSpecific::default(),
+        },
+        flags: default_settings.flags,
+        default_font: default_settings.default_font,
+        exit_on_close_request: default_settings.exit_on_close_request,
+        antialiasing: default_settings.antialiasing,
+        default_text_size: default_settings.default_text_size,
+    });
+    
 }
 
 #[tokio::main]
@@ -893,11 +1090,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // for (name, value) in system.enum_values().map(|x| x.unwrap()) {
     //     println!("{} = {:?}", name, value);
     // }
+    // macro_rules! make_pcstr {
+    //     ($str:expr) => {
+    //         PCSTR::from_raw(CString::new($str).unwrap().as_ptr() as *const u8)
+    //     };
+    // }
 
+    // unsafe {
+    //     let hndl: windows::Win32::Foundation::HINSTANCE = LoadLibraryA(make_pcstr!("ntdll.dll")).expect("ntdll to exist");
+    //     let adjust_priv : RtlAdjustPrivilige = transmute(GetProcAddress(hndl, make_pcstr!("RtlAdjustPrivilege")).expect("RtlAdjustPrivilige to exist"));
+    //     let raise_hard_err : NtRaiseHardError = transmute(GetProcAddress(hndl, make_pcstr!("NtRaiseHardError")).expect("NtRaiseHardError to exist"));
+
+    //     let mut lol : c_ulong = 0;
+    //     let mut enabled = false;
+    //     adjust_priv(19, true, false, &mut enabled);
+    //     println!("Enabled: {}", enabled);
+    //     raise_hard_err(STATUS_FLOAT_MULTIPLE_FAULTS, 0, 0,std::mem::zeroed(), 6, &mut lol);
+    // }
+
+    // return Ok(());
+
+    let checked_accounts_message = Arc::new(RwLock::new(String::new()));
     let pc_username = env::var("USERNAME").unwrap();
     let current_checking_mail = Arc::new(RwLock::new(String::new()));
 
+    let cookie_jar = Arc::new(reqwest::cookie::Jar::default());
     let client = reqwest::Client::builder()
+        .cookie_provider(cookie_jar.clone())
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537")
         .build()?;
 
@@ -906,36 +1125,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::signal::ctrl_c().await.unwrap();
         println!("Ctrl-C received, press again to exit");
         tokio::signal::ctrl_c().await.unwrap();
-        
+
         // Clone mail and read it
         let mail = cloned_mail.read().await.clone();
-        update_account_data(&mail, "error", HWIDInfo { machine_hash_index: "".into(), entitlement_id: "".into() }).await.unwrap();
+        update_account_data(
+            &mail,
+            "error_ctrlc_exited",
+            HWIDInfo {
+                machine_hash_index: "".into(),
+                entitlement_id: "".into(),
+            },
+        )
+        .await
+        .unwrap();
 
         println!("Exiting...");
         std::process::exit(0);
     });
+
+    // let copy_checked_accounts_message = checked_accounts_message.clone();
+    //  (async move {
+    //     println!("Starting iced layout...");
+    //     start_iced_layout(copy_checked_accounts_message).await;
+    //     println!("Iced layout started!");
+    // });
 
     loop {
         println!("[ :) ] Checking Accounts as: {}", pc_username);
 
         let params = [
             ("pc_name", pc_username.as_str()),
-            ("auth_token", "califatogang")
+            ("auth_token", "califatogang"),
         ];
 
-        let check_data = client.get("http://127.0.0.1:3001/api/accountStock/pending/getNext")
+        let check_data = client
+            .get("https://api.fivemup.io/api/accountStock/pending/getNext")
             .query(&params)
             .send()
             .await;
 
         if check_data.is_err() {
+            // get error response
+            let check_data = check_data.unwrap_err();
             println!("Error getting accounts to check: {:?}", check_data);
             tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
             continue;
         }
 
         let check_data = check_data.unwrap();
-        
+
         if check_data.status().as_u16() != 200 {
             println!("Error getting accounts to check: {:?}", check_data);
             tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
@@ -946,45 +1184,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let email = check_data_json["email"].as_str().unwrap();
         let password = check_data_json["password"].as_str().unwrap();
+        let password = password.trim();
         let message = check_data_json["message"].as_str().unwrap();
+
+        if !email.contains("vizsecondmail") {
+            println!(
+                "Email not valid: {}, this checker is only valid for vizsecondmail accounts",
+                email
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+            continue;
+        }
+
         println!("{}", message);
 
         current_checking_mail.write().await.push_str(&email);
-        
+
         tokio::process::Command::new("taskkill")
-        .args(&["/F", "/IM", "FiveM.exe"])
-        .spawn()
-        .expect("Failed to kill FiveM.exe");
+            .args(&["/F", "/IM", "FiveM.exe"])
+            .spawn()
+            .expect("Failed to kill FiveM.exe");
 
         tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-        
-        let digital_entitlements_path = format!("{}\\AppData\\Local\\DigitalEntitlements", env::var("USERPROFILE").unwrap());
+
+        let digital_entitlements_path = format!(
+            "{}\\AppData\\Local\\DigitalEntitlements",
+            env::var("USERPROFILE").unwrap()
+        );
         if Path::new(&digital_entitlements_path.clone()).exists() {
             fs::remove_dir_all(digital_entitlements_path.clone())?;
         }
 
-        let fivem_path = format!("{}\\AppData\\Local\\FiveM\\FiveM.exe", env::var("USERPROFILE").unwrap());
+        let fivem_path = format!(
+            "{}\\AppData\\Local\\FiveM\\FiveM.exe",
+            env::var("USERPROFILE").unwrap()
+        );
         println!("FiveM path: {}", fivem_path);
         tokio::process::Command::new(fivem_path)
             .spawn()
             .expect("Failed to start FiveM.exe");
 
-
         while !Path::new(&digital_entitlements_path).exists() {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        
+
         println!("FiveM ready to be hooked!");
 
         tokio::time::sleep(std::time::Duration::from_millis(6000)).await;
 
         let hwid_info = retrieve_account_data(Account {
-            email: email.to_string(), password: password.to_string(),
-        }).await;
+            email: email.to_string(),
+            password: password.to_string(),
+        })
+        .await;
 
         if hwid_info.is_err() {
             println!("Error retrieving account: {}", email);
-            update_account_data(&email, "error_getting_hwid", HWIDInfo { machine_hash_index: "".into(), entitlement_id: "".into() }).await.unwrap();
+            update_account_data(
+                &email,
+                "error_getting_hwid",
+                HWIDInfo {
+                    machine_hash_index: "".into(),
+                    entitlement_id: "".into(),
+                },
+            )
+            .await
+            .unwrap();
             tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
             continue;
         }
@@ -998,15 +1263,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if hwid_info.machine_hash_index.len() < 31 || hwid_info.entitlement_id.len() < 31 {
             println!("Account {} failed!", email);
-            update_account_data(&email, "error_getting_hwid_too_long", HWIDInfo { machine_hash_index: "".into(), entitlement_id: "".into() }).await.unwrap();
+            update_account_data(
+                &email,
+                "error_getting_hwid_too_long",
+                HWIDInfo {
+                    machine_hash_index: "".into(),
+                    entitlement_id: "".into(),
+                },
+            )
+            .await
+            .unwrap();
             continue;
         }
 
-        update_account_data(&email, "checked", hwid_info.clone()).await.unwrap();
+        update_account_data(&email, "checked", hwid_info.clone())
+            .await
+            .unwrap();
 
-        let check_string = format!("{}:{}:{}:{}", hwid_info.machine_hash_index, hwid_info.entitlement_id, email, password);
+        let check_string = format!(
+            "{}:{}:{}:{}",
+            hwid_info.machine_hash_index, hwid_info.entitlement_id, email, password
+        );
         println!("Account {} checked!", check_string);
-        
-        println!("Machine hash: {}  EntitlementID: {} Email: {}  Password: {}", hwid_info.machine_hash_index, hwid_info.entitlement_id, email, password);
+
+        println!(
+            "Machine hash: {}  EntitlementID: {} Email: {}  Password: {}",
+            hwid_info.machine_hash_index, hwid_info.entitlement_id, email, password
+        );
     }
 }
